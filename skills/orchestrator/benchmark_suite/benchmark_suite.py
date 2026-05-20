@@ -163,12 +163,12 @@ def run_stage_reproduce(
     clone_depth: int,
     summary: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Stage 1: reproduce paper — clone & test."""
-    reproduce_dir = stage_dir(output_dir, 1, 'reproduce')
+    """Stage 2: reproduce paper — clone, install, execute, verify."""
+    reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
     reproduce_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 1: Reproduce Paper')
+    print(f'  Stage 2: Reproduce Paper')
     print(f'{"=" * 60}')
 
     # Determine input text for reproduce
@@ -227,17 +227,17 @@ def run_stage_process_data(
     summary: Dict[str, Any],
     no_process: bool = False,
 ) -> Dict[str, Any]:
-    """Stage 2: process downloaded datasets through OmicsClaw sc tools."""
+    """Stage 1: process downloaded datasets through OmicsClaw sc tools."""
     process_dir = stage_dir(output_dir, 2, 'process_data')
     process_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 2: Process Downloaded Data')
+    print(f'  Stage 1: Process Downloaded Data')
     print(f'{"=" * 60}')
 
     if no_process:
         print('  Data processing skipped (--no-process).')
-        summary['stages']['02_process_data'] = {'status': 'skipped', 'reason': '--no-process flag'}
+        summary['stages']['01_process_data'] = {'status': 'skipped', 'reason': '--no-process flag'}
         save_summary(output_dir, summary)
         return {'processed': [], 'status': 'skipped'}
 
@@ -249,7 +249,7 @@ def run_stage_process_data(
 
     if not data_dirs:
         print('  No downloaded data files found. Run without --no-download first.')
-        summary['stages']['02_process_data'] = {'status': 'skipped', 'reason': 'No data files'}
+        summary['stages']['01_process_data'] = {'status': 'skipped', 'reason': 'No data files'}
         save_summary(output_dir, summary)
         return {'processed': [], 'status': 'skipped'}
 
@@ -302,7 +302,7 @@ def run_stage_process_data(
                 'note': 'MTX format requires scanpy read before processing',
             })
 
-    summary['stages']['02_process_data'] = {
+    summary['stages']['01_process_data'] = {
         'status': 'completed',
         'output_dir': str(process_dir),
         'datasets_processed': len(processed),
@@ -433,8 +433,8 @@ def run_stage_benchmark_evaluate(
         return {'status': 'skipped'}
 
     # Determine input directories from previous stages
-    process_dir = stage_dir(output_dir, 2, 'process_data')
-    reproduce_dir = stage_dir(output_dir, 1, 'reproduce')
+    process_dir = stage_dir(output_dir, 1, 'process_data')
+    reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
 
     catalog_path = (
         _PROJECT_ROOT / 'orchestrator' / 'reproducibility_evaluation' / 'metrics_catalog.json'
@@ -522,9 +522,21 @@ def run_benchmark_suite(
         print(f'     {stage_dir(output_dir, 0, "benchmark_dispatch")}')
         print(f'     Run with --resume to skip to Stage 1.\n')
 
-    # --- Stage 1: Reproduce ---
+    # --- Stage 1: Process downloaded data ---
     if resume and is_stage_completed(output_dir, 1):
         print(f'  ↪ Stage 1 already completed, resuming at stage 2.')
+    else:
+        run_stage_process_data(
+            collected_data, output_dir, summary, no_process=no_process,
+        )
+        mark_stage_completed(output_dir, 1)
+        print(f'\n  🛑 CHECKPOINT: Stage 1 complete. Review artifacts at:')
+        print(f'     {stage_dir(output_dir, 1, "process_data")}')
+        print(f'     Run with --resume to skip to Stage 2.\n')
+
+    # --- Stage 2: Reproduce Paper ---
+    if resume and is_stage_completed(output_dir, 2):
+        print(f'  ↪ Stage 2 already completed, resuming at stage 3.')
     else:
         # Load dispatch results if not already in memory
         if not collected_data:
@@ -548,21 +560,9 @@ def run_benchmark_suite(
             no_reproduce_clone, no_reproduce_install, no_reproduce_run,
             clone_depth, summary,
         )
-        mark_stage_completed(output_dir, 1)
-        print(f'\n  🛑 CHECKPOINT: Stage 1 complete. Review artifacts at:')
-        print(f'     {stage_dir(output_dir, 1, "reproduce")}')
-        print(f'     Run with --resume to skip to Stage 2.\n')
-
-    # --- Stage 2: Process downloaded data ---
-    if resume and is_stage_completed(output_dir, 2):
-        print(f'  ↪ Stage 2 already completed, resuming at stage 3.')
-    else:
-        run_stage_process_data(
-            collected_data, output_dir, summary, no_process=no_process,
-        )
         mark_stage_completed(output_dir, 2)
         print(f'\n  🛑 CHECKPOINT: Stage 2 complete. Review artifacts at:')
-        print(f'     {stage_dir(output_dir, 2, "process_data")}')
+        print(f'     {stage_dir(output_dir, 2, "reproduce")}')
         print(f'     Run with --resume to skip to Stage 3.\n')
 
     # --- Stage 3: Reproducibility Evaluation ---
@@ -570,8 +570,8 @@ def run_benchmark_suite(
         print(f'  ↪ Stage 3 already completed.')
     else:
         # Load reproduce result from disk if needed
-        if reproduce_result is None and is_stage_completed(output_dir, 1):
-            reproduce_dir = stage_dir(output_dir, 1, 'reproduce')
+        if reproduce_result is None and is_stage_completed(output_dir, 2):
+            reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
             result_file = reproduce_dir / 'reproducibility' / 'result.json'
             if result_file.exists():
                 reproduce_result = {'result': json.loads(result_file.read_text())}

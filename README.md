@@ -17,11 +17,11 @@ benchmark-type (e.g. "integration")
   ├── Stage 0:  Literature & Dataset Collection
   │             PubMed / arXiv / GitHub / Zenodo → papers with public data
   │
-  ├── Stage 1:  Paper Reproduction
-  │             Clone repo → build env → run paper-specific commands → verify outputs
-  │
-  ├── Stage 2:  Data Processing
+  ├── Stage 1:  Data Processing
   │             Downloaded .h5ad → sc-preprocessing → sc-analysis-skill
+  │
+  ├── Stage 2:  Paper Reproduction
+  │             Clone repo → build env → run paper-specific commands → verify outputs
   │
   ├── Stage 3:  Reproducibility Evaluation
   │             Did the reproduction succeed?  Which phase failed?  Score.
@@ -40,8 +40,8 @@ The benchmark is built *from* the data.
 | Stage | Name | What it does | Key output |
 |-------|------|--------------|------------|
 | 0 | `benchmark_dispatch` | LLM-powered search across PubMed, arXiv, GitHub, Zenodo, Scholar. Extracts GEO / SRA / cellxgene accessions. | `literature/` with metadata, `llm_audit.json` for review |
-| 1 | `reproduce_paper` | Discovers code repos from paper text (LLM + regex + metadata). Clones, installs deps, runs paper-specific commands, verifies output files. | `reproducibility/plan.json`, `result.json`, `report.md` |
-| 2 | `process_data` | Auto-processes downloaded `.h5ad` through OmicsClaw sc tools (sc-preprocessing, sc-batch-integration, etc.) | `processed.h5ad` per dataset |
+| 1 | `process_data` | Auto-processes downloaded `.h5ad` through OmicsClaw sc tools (sc-preprocessing, sc-batch-integration, etc.) | `processed.h5ad` per dataset |
+| 2 | `reproduce_paper` | Discovers code repos from paper text (LLM + regex + metadata). Clones, installs deps, runs paper-specific commands, verifies output files. | `reproducibility/plan.json`, `result.json`, `report.md` |
 | 3 | `reproducibility_evaluation` | Scores clone / install / run / verify phases, suggests missing metrics. | `reproducibility_metrics.json` |
 | 4 | `benchmark_evaluation` | Uses autoagent evaluator to compute biological metrics (iLISI, silhouette, etc.), generates rankings and composite scores. | `benchmark_metrics.json`, `benchmark_report.md` |
 
@@ -82,9 +82,9 @@ output_dir/
       llm_results.json           # Final search results
       llm_audit.json             # LLM prompts & decisions (debuggable)
       llm_{pmid}/                # Per-paper metadata
-  01_reproduce/reproducibility/  # Reproduction artifacts
+  01_process_data/               # Processed .h5ad files
+  02_reproduce/reproducibility/  # Reproduction artifacts
     plan.json / result.json / report.md / commands.sh
-  02_process_data/               # Processed .h5ad files
   03_reproducibility_evaluation/ # Reproducibility scores
   04_benchmark_evaluation/       # Benchmark metrics & rankings
   .checkpoint_00 ~ .checkpoint_04

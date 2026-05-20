@@ -44,8 +44,8 @@ Chains `benchmark-dispatch`, `reproduce-paper`, `sc-data-processing`, and
 | Stage | Skill | Produces |
 |---|---|---|
 | 0 | benchmark-dispatch | literature, datasets, download |
-| 1 | reproduce-paper | reproducibility result, plan, report |
-| 2 | data-processing | processed h5ad via sc-preprocessing / sc-batch-integration |
+| 1 | data-processing | processed h5ad via sc-preprocessing / sc-batch-integration |
+| 2 | reproduce-paper | reproducibility result, plan, report |
 | 3 | reproducibility-evaluation | metrics, comparison report, suggestions |
 
 ## Checkpoints
@@ -60,12 +60,12 @@ output_dir/
   benchmark_suite_summary.json   # pipeline-level summary
   benchmark_suite_report.md      # human-readable final report
   .checkpoint_00                 # dispatch complete
-  .checkpoint_01                 # reproduce complete
-  .checkpoint_02                 # data process complete
+  .checkpoint_01                 # data process complete
+  .checkpoint_02                 # reproduce complete
   .checkpoint_03                 # evaluation complete
   00_benchmark_dispatch/         # dispatch artifacts
-  01_reproduce/                  # reproducibility artifacts
-  02_process_data/               # processed data artifacts
+  01_process_data/               # processed data artifacts
+  02_reproduce/                  # reproducibility artifacts
   03_reproducibility_evaluation/ # evaluation artifacts
 ```
 
