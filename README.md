@@ -1,13 +1,135 @@
-<a id="top"></a>
+# EasyBench
 
-<div align="center">
-  <img src="docs/images/OmicsClaw_logo.svg" alt="OmicsClaw Logo" width="380"/>
+> **Automated benchmark pipeline for single-cell omics** — from literature discovery to multi-metric evaluation.
 
-  <h2>🧬 OmicsClaw</h2>
-  <p><strong>Local-first AI research partner for multi-omics analysis</strong></p>
-  <p>Chat with your workflows · run reproducible skills · keep data local · resume with memory</p>
+EasyBench builds on [OmicsClaw](https://github.com/TianGzlab/OmicsClaw)'s
+multi-omics analysis skills and adds a fully automated benchmark pipeline
+that takes a **benchmark type** as input and produces a **ranked evaluation
+report** as output.
 
-  <p>
+---
+
+## Core Concept
+
+```
+benchmark-type (e.g. "integration")
+  │
+  ├── Stage 0:  Literature & Dataset Collection
+  │             PubMed / arXiv / GitHub / Zenodo → papers with public data
+  │
+  ├── Stage 1:  Paper Reproduction
+  │             Clone repo → build env → run paper-specific commands → verify outputs
+  │
+  ├── Stage 2:  Data Processing
+  │             Downloaded .h5ad → sc-preprocessing → sc-analysis-skill
+  │
+  ├── Stage 3:  Reproducibility Evaluation
+  │             Did the reproduction succeed?  Which phase failed?  Score.
+  │
+  └── Stage 4:  Benchmark Evaluation
+                Apply benchmark-specific metrics → rank datasets / methods → report
+```
+
+**Key insight**: we search for **single-cell datasets** (not benchmark papers).
+The benchmark is built *from* the data.
+
+---
+
+## 5-Stage Pipeline
+
+| Stage | Name | What it does | Key output |
+|-------|------|--------------|------------|
+| 0 | `benchmark_dispatch` | LLM-powered search across PubMed, arXiv, GitHub, Zenodo, Scholar. Extracts GEO / SRA / cellxgene accessions. | `literature/` with metadata, `llm_audit.json` for review |
+| 1 | `reproduce_paper` | Discovers code repos from paper text (LLM + regex + metadata). Clones, installs deps, runs paper-specific commands, verifies output files. | `reproducibility/plan.json`, `result.json`, `report.md` |
+| 2 | `process_data` | Auto-processes downloaded `.h5ad` through OmicsClaw sc tools (sc-preprocessing, sc-batch-integration, etc.) | `processed.h5ad` per dataset |
+| 3 | `reproducibility_evaluation` | Scores clone / install / run / verify phases, suggests missing metrics. | `reproducibility_metrics.json` |
+| 4 | `benchmark_evaluation` | Uses autoagent evaluator to compute biological metrics (iLISI, silhouette, etc.), generates rankings and composite scores. | `benchmark_metrics.json`, `benchmark_report.md` |
+
+---
+
+## Quick Start
+
+```bash
+# Full pipeline (LLM-powered, requires DeepSeek API key)
+export DEEPSEEK_API_KEY="sk-..."
+python -m skills.orchestrator.benchmark_suite.benchmark_suite \
+  --benchmark-type integration \
+  --output ./my_benchmark \
+  --use-llm
+
+# Resume an interrupted run
+python -m skills.orchestrator.benchmark_suite.benchmark_suite \
+  --benchmark-type integration \
+  --output ./my_benchmark \
+  --resume
+
+# Skip heavy stages for quick iteration
+python -m skills.orchestrator.benchmark_suite.benchmark_suite \
+  --benchmark-type integration \
+  --output ./quick_test \
+  --use-llm \
+  --no-download --no-process --no-reproduce-clone --no-reproduce-install --no-reproduce-run --no-evaluate
+```
+
+---
+
+## Output Structure
+
+```
+output_dir/
+  00_benchmark_dispatch/         # Collected literature + datasets
+    literature/
+      llm_results.json           # Final search results
+      llm_audit.json             # LLM prompts & decisions (debuggable)
+      llm_{pmid}/                # Per-paper metadata
+  01_reproduce/reproducibility/  # Reproduction artifacts
+    plan.json / result.json / report.md / commands.sh
+  02_process_data/               # Processed .h5ad files
+  03_reproducibility_evaluation/ # Reproducibility scores
+  04_benchmark_evaluation/       # Benchmark metrics & rankings
+  .checkpoint_00 ~ .checkpoint_04
+  benchmark_suite_summary.json
+  benchmark_suite_report.md
+```
+
+---
+
+## Supported Benchmark Types
+
+| Type | Analysis Focus | Metrics |
+|------|---------------|---------|
+| `integration` | Multi-dataset harmonization | iLISI, cLISI, batch ASW, cell-type ASW |
+| `clustering` | Unsupervised cell grouping | silhouette, Calinski-Harabasz, n_clusters |
+| `annotation` | Cell-type classification | n_cell_types, mean_confidence |
+| `spatial` | Spatial domain detection | Moran's I, domain separation |
+| `trajectory` | Pseudotime inference | trajectory correlation, Kendall's Tau |
+| `batch_correction` | Batch effect removal | kBET, ASW batch, batch entropy |
+| ... | (extensible via `metrics_catalog.json`) | |
+
+---
+
+## LLM Integration
+
+EasyBench uses DeepSeek (via OmicsClaw's `autoagent.llm_client`) for:
+
+1. **Query generation** — LLM generates targeted PubMed / arXiv queries to find papers with public datasets
+2. **Paper details extraction** — LLM reads paper abstracts and extracts GEO/SRA IDs, species, tissue, methods
+3. **Article ranking** — LLM ranks candidates by likelihood of containing reusable data
+
+All LLM interactions are recorded in `llm_audit.json` for review and debugging.
+
+---
+
+## Attribution
+
+EasyBench is based on [OmicsClaw](https://github.com/TianGzlab/OmicsClaw)
+(Apache 2.0).  See [ATTRIBUTION.md](ATTRIBUTION.md) for details.
+
+---
+
+## License
+
+Apache 2.0.  See [LICENSE](LICENSE).
     <a href="README.md"><b>English</b></a> ·
     <a href="README_zh-CN.md"><b>简体中文</b></a> ·
     <a href="#-why-omicsclaw"><b>Why</b></a> ·
