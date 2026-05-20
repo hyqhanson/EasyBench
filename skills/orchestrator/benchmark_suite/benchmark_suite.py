@@ -228,7 +228,7 @@ def run_stage_process_data(
     no_process: bool = False,
 ) -> Dict[str, Any]:
     """Stage 1: process downloaded datasets through OmicsClaw sc tools."""
-    process_dir = stage_dir(output_dir, 2, 'process_data')
+    process_dir = stage_dir(output_dir, 1, 'process_data')
     process_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
