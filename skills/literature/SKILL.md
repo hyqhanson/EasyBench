@@ -1,13 +1,13 @@
 ---
 name: literature
 description: >-
-  Parse scientific literature (PDFs, URLs, DOIs) to extract GEO accessions,
-  metadata, and datasets. Use when users provide a paper and want to
-  automatically extract data sources for downstream omics analysis.
-version: 0.1.0
+  Parse scientific literature (PDFs, URLs, DOIs) to extract GEO, SRA, and
+  cellxgene accessions, metadata, and candidate datasets for downstream omics analysis.
+  Supports benchmark-type aware extraction to prioritize relevant datasets.
+version: 0.1.1
 author: OmicsClaw
 license: MIT
-tags: [literature, pdf-parsing, geo, pubmed, data-download]
+tags: [literature, pdf-parsing, geo, sra, cellxgene, pubmed, data-download, benchmark]
 metadata:
   omicsclaw:
     domain: literature
@@ -27,89 +27,94 @@ metadata:
       - parse paper
       - literature
       - GEO accession
+      - SRA accession
+      - cellxgene
       - download dataset
       - PDF extract
       - PubMed
       - DOI
+      - benchmark
 ---
 
 # Literature Parsing Skill
 
 ## Purpose
 
-Parse scientific literature (PDFs, URLs, DOIs) to extract GEO accessions and metadata, then download datasets for downstream omics analysis.
+Parse scientific literature (PDFs, URLs, DOIs) to extract GEO、SRA 和 cellxgene 数据集引用，生成元信息并下载候选数据源。
 
 ## Methodology
 
 ### 1. Input Processing
 
 Accepts multiple input types:
-- **URL**: PubMed, bioRxiv, journal article links
+- **URL**: PubMed、bioRxiv、期刊文章链接或 cellxgene 页面
 - **DOI**: Digital Object Identifier (e.g., 10.1038/s41586-021-03569-1)
 - **PubMed ID**: PMID (e.g., 33234567)
-- **PDF**: Uploaded scientific paper
-- **Text**: Raw text containing GEO references
+- **PDF**: 上传的科学论文
+- **Text**: 原始文本包含数据集引用
 
 ### 2. Metadata Extraction
 
 Extracts structured information:
-- **GEO Accessions**: GSE (study-level), GSM (sample-level)
-- **Organism**: Species (e.g., Homo sapiens, Mus musculus)
-- **Tissue**: Tissue type or organ
-- **Cell Type**: Cell type if specified
-- **Technology**: Sequencing platform (10x, Visium, etc.)
+- **GEO Accessions**: GSE、GSM、GPL
+- **SRA Accessions**: SRP、SRR、SRS、ERP、ERS、DRP、DRS
+- **cellxgene datasets**: dataset slugs or URLs
+- **Organism**: Species
+- **Tissue**: Tissue or organ
+- **Technology**: Sequencing platform
+- **Benchmark Relevance**: Score based on specified benchmark type
 
 ### 3. Data Download
 
-Downloads datasets from GEO:
-- Resolves GSE to find all associated GSM samples
-- Downloads expression matrices (.h5ad, .mtx, .csv)
-- Organizes files by accession: `data/GSE123456/`
-- Generates metadata.json with extracted information
+Downloads candidate data sources:
+- GEO: supplementary files from NCBI GEO FTP
+- SRA: metadata XML and optional SRA run files
+- cellxgene: page-derived candidate files such as `.h5ad`, `.cxg`, `.zip`
+- Organizes results under `data/<accession>/`
+- Generates JSON metadata for each source
 
 ### 4. Error Handling
 
-- **Retry with fallbacks**: PDF parsing → text extraction → manual patterns
-- **Partial results**: Returns successfully extracted data even if some downloads fail
-- **Logging**: Detailed logs for debugging
+- **Retry with fallbacks**: network retries and HTML listing parsing
+- **Partial results**: preserves successfully downloaded artifacts even if some sources fail
+- **Logging**: prints progress and failure details
 
 ## Output
 
-- **data/GSE*/**: Downloaded datasets organized by accession
-- **output/literature-parse_*/report.md**: Extraction report
-- **output/literature-parse_*/metadata.json**: Structured metadata
+- **data/GSE*/**, **data/SRP*/**, **data/<cellxgene_slug>/**: downloaded or candidate files
+- **output/literature-parse_*/report.md**: extraction and download report
+- **output/literature-parse_*/extracted_metadata.json**: structured metadata
 
 ## Usage
 
 ```bash
-# Parse from URL
 python skills/literature/literature_parse.py \
   --input "https://pubmed.ncbi.nlm.nih.gov/12345" \
+  --benchmark-type integration \
   --output output/literature_results
 
-# Parse from DOI
 python skills/literature/literature_parse.py \
   --input "10.1038/s41586-021-03569-1" \
   --input-type doi \
+  --benchmark-type spatial \
   --output output/literature_results
 
-# Parse PDF
 python skills/literature/literature_parse.py \
   --input paper.pdf \
   --input-type file \
+  --benchmark-type multiome \
   --output output/literature_results
 ```
 
 ## Integration
 
-After extraction, the bot automatically suggests appropriate analysis skills based on:
-- Data type (spatial, single-cell, bulk)
-- Organism and tissue
-- Available files
+After extraction, the bot can suggest downstream OmicsClaw skills based on:
+- data modality (single-cell, spatial, bulk)
+- organism and tissue
+- available file formats
 
 ## Dependencies
 
 - pypdf: PDF text extraction
 - requests: HTTP requests
 - beautifulsoup4: HTML parsing
-- GEOparse: GEO data access (optional, fallback to direct API)

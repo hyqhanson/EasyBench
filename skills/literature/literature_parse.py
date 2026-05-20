@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Literature parsing CLI - extract GEO data from scientific papers."""
+"""Literature parsing CLI - extract dataset accessions from papers and download sources."""
 
 import argparse
 import json
@@ -12,11 +12,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from skills.literature.core.parser import parse_input
 from skills.literature.core.extractor import extract_metadata
-from skills.literature.core.downloader import download_geo_dataset
+from skills.literature.core.downloader import (
+    download_cellxgene_dataset,
+    download_geo_dataset,
+    download_sra_dataset,
+)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Parse literature and extract GEO datasets')
+    parser = argparse.ArgumentParser(description='Parse literature and extract dataset accessions')
     parser.add_argument('--input', required=True, help='URL, DOI, PubMed ID, PDF path, or text')
     parser.add_argument('--input-type', default='auto',
                        choices=['auto', 'url', 'doi', 'pubmed', 'file', 'text'],
@@ -25,24 +29,24 @@ def main():
     parser.add_argument('--no-download', action='store_true',
                        help='Extract metadata only, skip download')
     parser.add_argument('--data-dir', help='Data directory for downloads (default: data/)')
+    parser.add_argument('--benchmark-type', 
+                       choices=['integration', 'matching', 'clustering', 'annotation', 'denoising', 'imputation', 'batch_correction', 'trajectory', 'celltype', 'spatial', 'multiome'],
+                       help='Benchmark type to prioritize relevant datasets')
 
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine data directory
     if args.data_dir:
         data_dir = Path(args.data_dir)
     else:
-        # Use project root data/ directory
         project_root = Path(__file__).parent.parent.parent
         data_dir = project_root / 'data'
     data_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Parsing input: {args.input}")
 
-    # Parse input
     text, detected_type = parse_input(args.input, args.input_type)
     print(f"Detected input type: {detected_type}")
 
@@ -50,47 +54,69 @@ def main():
         print(f"Failed to parse input: {text}")
         sys.exit(1)
 
-    # Extract metadata
     print("Extracting metadata...")
-    metadata = extract_metadata(text)
+    metadata = extract_metadata(text, benchmark_type=args.benchmark_type)
 
-    geo_acc = metadata['geo_accessions']
-    gse_ids = geo_acc.get('gse', [])
+    geo_acc = metadata.get('geo_accessions', {})
+    sra_ids = metadata.get('sra_accessions', [])
+    cellxgene_ids = metadata.get('cellxgene_accessions', [])
 
-    print(f"Found {len(gse_ids)} GEO datasets: {', '.join(gse_ids)}")
+    print(f"Found {len(geo_acc.get('gse', []))} GEO datasets: {', '.join(geo_acc.get('gse', []))}")
+    print(f"Found {len(sra_ids)} SRA accessions: {', '.join(sra_ids)}")
+    print(f"Found {len(cellxgene_ids)} cellxgene datasets: {', '.join(cellxgene_ids)}")
     print(f"Organism: {metadata['organism']}")
     print(f"Tissue: {metadata['tissue']}")
     print(f"Technology: {metadata['technology']}")
+    if args.benchmark_type:
+        print(f"Benchmark type: {args.benchmark_type}")
+        print(f"Relevance score: {metadata.get('relevance_score', 0)}")
 
-    # Save metadata
     metadata_file = output_dir / 'extracted_metadata.json'
     metadata_file.write_text(json.dumps(metadata, indent=2))
 
-    # Download datasets
     download_results = []
-    if not args.no_download and gse_ids:
-        print(f"\nDownloading datasets to {data_dir}...")
-        for gse_id in gse_ids:
-            print(f"\nProcessing {gse_id}...")
-            result = download_geo_dataset(gse_id, data_dir)
-            download_results.append(result)
+    if not args.no_download:
+        if geo_acc.get('gse'):
+            print(f"\nDownloading GEO datasets to {data_dir}...")
+            for gse_id in geo_acc.get('gse', []):
+                print(f"\nProcessing {gse_id}...")
+                result = download_geo_dataset(gse_id, data_dir)
+                download_results.append(result)
+                print_download_status(result, gse_id)
 
-            if result['status'] == 'success':
-                print(f"✓ {gse_id}: Downloaded {len(result['files'])} files")
-            elif result['status'] == 'partial':
-                print(f"⚠ {gse_id}: Partial download ({len(result['files'])} files)")
-            else:
-                print(f"✗ {gse_id}: Failed - {', '.join(result['errors'])}")
+        if sra_ids:
+            print(f"\nDownloading SRA metadata to {data_dir}...")
+            for sra_id in sra_ids:
+                print(f"\nProcessing {sra_id}...")
+                result = download_sra_dataset(sra_id, data_dir)
+                download_results.append(result)
+                print_download_status(result, sra_id)
 
-    # Generate report
+        if cellxgene_ids:
+            print(f"\nDownloading cellxgene candidates to {data_dir}...")
+            for dataset_id in cellxgene_ids:
+                print(f"\nProcessing {dataset_id}...")
+                result = download_cellxgene_dataset(dataset_id, data_dir)
+                download_results.append(result)
+                print_download_status(result, dataset_id)
+
     generate_report(output_dir, metadata, download_results, args.no_download)
 
     print(f"\n✓ Results saved to {output_dir}")
     print(f"  - Report: {output_dir / 'report.md'}")
     print(f"  - Metadata: {metadata_file}")
 
-    if download_results:
+    if download_results and not args.no_download:
         print(f"  - Downloaded data: {data_dir}")
+
+
+def print_download_status(result: dict, accession: str) -> None:
+    if result['status'] == 'success':
+        print(f"✓ {accession}: Downloaded {len(result['files'])} files")
+    elif result['status'] == 'partial':
+        print(f"⚠ {accession}: Partial download ({len(result['files'])} files)")
+    else:
+        print(f"✗ {accession}: Failed - {', '.join(result.get('errors', []))}")
 
 
 def generate_report(output_dir: Path, metadata: dict, download_results: list, no_download: bool):
@@ -104,36 +130,39 @@ def generate_report(output_dir: Path, metadata: dict, download_results: list, no
         f"- **Technology**: {metadata['technology']}",
     ]
 
-    geo_acc = metadata['geo_accessions']
-    if geo_acc['gse']:
-        report_lines.append(f"\n## GEO Datasets\n")
+    geo_acc = metadata.get('geo_accessions', {})
+    if geo_acc.get('gse'):
+        report_lines.append("\n## GEO Datasets\n")
         for gse_id in geo_acc['gse']:
             report_lines.append(f"- **{gse_id}**")
+
+    if metadata.get('sra_accessions'):
+        report_lines.append("\n## SRA Accessions\n")
+        for sra_id in metadata['sra_accessions']:
+            report_lines.append(f"- **{sra_id}**")
+
+    if metadata.get('cellxgene_accessions'):
+        report_lines.append("\n## cellxgene Datasets\n")
+        for dataset_id in metadata['cellxgene_accessions']:
+            report_lines.append(f"- **{dataset_id}**")
 
     if download_results:
         report_lines.append("\n## Download Results\n")
         for result in download_results:
-            gse_id = result['gse_id']
+            accession = result.get('gse_id') or result.get('sra_id') or result.get('cellxgene_id')
+            source = result.get('source', 'unknown')
             status = result['status']
             files = result['files']
-
-            if status == 'success':
-                report_lines.append(f"### {gse_id} ✓")
-                report_lines.append(f"\nDownloaded {len(files)} files:")
-                for f in files[:5]:  # Show first 5
-                    report_lines.append(f"- `{Path(f).name}`")
-                if len(files) > 5:
-                    report_lines.append(f"- ... and {len(files) - 5} more")
-            else:
-                report_lines.append(f"### {gse_id} ✗")
-                report_lines.append(f"\nStatus: {status}")
-                if result['errors']:
-                    report_lines.append(f"\nErrors: {', '.join(result['errors'])}")
+            report_lines.append(f"### {accession} ({source})")
+            report_lines.append(f"- Status: {status}")
+            report_lines.append(f"- Files: {len(files)}")
+            if result.get('errors'):
+                report_lines.append(f"- Errors: {', '.join(result['errors'])}")
 
     report_lines.append("\n## Next Steps")
-    report_lines.append("\nYou can now analyze the downloaded data using OmicsClaw skills:")
-    report_lines.append("- For spatial data: `spatial-preprocessing`")
-    report_lines.append("- For single-cell data: `sc-preprocessing`")
+    report_lines.append("\nUse OmicsClaw skills for downstream analysis:")
+    report_lines.append("- For single-cell preprocessing: `oc run sc-preprocessing --input <file> --output <dir>`")
+    report_lines.append("- For spatial analysis: `oc run spatial-preprocess --input <file> --output <dir>`")
 
     report_file = output_dir / 'report.md'
     report_file.write_text('\n'.join(report_lines))

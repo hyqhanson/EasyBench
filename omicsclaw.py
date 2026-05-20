@@ -609,6 +609,14 @@ def run_skill(
             session_path=session_path,
         )
 
+    if skill_name == "benchmark-suite":
+        return _run_benchmark_suite(
+            input_path=input_path,
+            output_dir=output_dir,
+            demo=demo,
+            extra_args=extra_args,
+        )
+
     skill_info = SKILLS.get(skill_name)
     if skill_info is None:
         return _err(skill_name, f"Unknown skill '{skill_name}'. Available: {list(SKILLS.keys())}")
@@ -899,6 +907,90 @@ def _run_spatial_pipeline(
         "readme_path": str(pipeline_readme),
         "notebook_path": "",
     }
+
+
+def _run_benchmark_suite(
+    input_path: str | None = None,
+    output_dir: str | None = None,
+    demo: bool = False,
+    extra_args: list[str] | None = None,
+) -> dict:
+    """Run the benchmark-suite pipeline end-to-end."""
+    if str(OMICSCLAW_DIR) not in sys.path:
+        sys.path.insert(0, str(OMICSCLAW_DIR))
+
+    from orchestrator.benchmark_suite.benchmark_suite import run_benchmark_suite
+
+    if extra_args is None:
+        extra_args = []
+
+    def _extract(flag: str, default=None):
+        prefix = f"--{flag}="
+        for arg in extra_args:
+            if arg.startswith(prefix):
+                return arg[len(prefix):]
+        for i, arg in enumerate(extra_args):
+            if arg == f"--{flag}" and i + 1 < len(extra_args) and not extra_args[i + 1].startswith("-"):
+                return extra_args[i + 1]
+        return default
+
+    def _has_flag(flag: str) -> bool:
+        return f"--{flag}" in extra_args
+
+    benchmark_type = _extract("benchmark-type", "")
+    if not benchmark_type:
+        return _err("benchmark-suite", "Missing --benchmark-type")
+    query = _extract("query")
+    repo_url = _extract("repo-url")
+    resume = _has_flag("resume")
+    no_download = _has_flag("no-download") or _has_flag("bench-no-download")
+    no_reproduce_clone = _has_flag("no-reproduce-clone") or _has_flag("bench-no-reproduce-clone")
+    no_reproduce_install = _has_flag("no-reproduce-install") or _has_flag("bench-no-reproduce-install")
+    no_reproduce_run = _has_flag("no-reproduce-run") or _has_flag("bench-no-reproduce-run")
+    clone_depth = int(_extract("clone-depth", "1"))
+    no_suggestions = _has_flag("no-suggestions") or _has_flag("bench-no-suggestions")
+    use_llm = _has_flag("use-llm") or _has_flag("bench-use-llm")
+    no_process = _has_flag("no-process") or _has_flag("bench-no-process")
+
+    if not output_dir:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = str(DEFAULT_OUTPUT_ROOT / f"benchmark-suite_{ts}")
+
+    t0 = time.time()
+    try:
+        suite_result = run_benchmark_suite(
+            benchmark_type,
+            query=query,
+            specific_input=input_path,
+            repo_url=repo_url,
+            output=output_dir,
+            resume=resume,
+            no_download=no_download,
+            no_reproduce_clone=no_reproduce_clone,
+            no_reproduce_install=no_reproduce_install,
+            no_reproduce_run=no_reproduce_run,
+            clone_depth=clone_depth,
+            include_suggestions=not no_suggestions,
+            use_llm=use_llm,
+            no_process=no_process,
+        )
+        duration = round(time.time() - t0, 2)
+        return {
+            "skill": "benchmark-suite",
+            "success": True,
+            "exit_code": 0,
+            "output_dir": str(output_dir),
+            "files": [str(p.relative_to(output_dir)) for p in Path(output_dir).rglob("*") if p.is_file()],
+            "stdout": f"Benchmark suite completed in {duration}s.",
+            "stderr": "",
+            "duration_seconds": duration,
+            "method": benchmark_type,
+            "readme_path": suite_result.get("report_path", ""),
+            "notebook_path": "",
+        }
+    except Exception as exc:
+        duration = round(time.time() - t0, 2)
+        return _err("benchmark-suite", str(exc), duration=duration)
 
 
 def _store_result_in_session(
@@ -1323,6 +1415,16 @@ def main():
     # bulkrna-survival
     run_p.add_argument("--clinical")
     run_p.add_argument("--cutoff-method")
+    # benchmark-suite-specific
+    run_p.add_argument("--benchmark-type")
+    run_p.add_argument("--query")
+    run_p.add_argument("--resume", action="store_true")
+    run_p.add_argument("--no-download", action="store_true", dest="bench_no_download")
+    run_p.add_argument("--no-reproduce-clone", action="store_true", dest="bench_no_reproduce_clone")
+    run_p.add_argument("--no-reproduce-install", action="store_true", dest="bench_no_reproduce_install")
+    run_p.add_argument("--no-reproduce-run", action="store_true", dest="bench_no_reproduce_run")
+    run_p.add_argument("--clone-depth", type=int, default=1, dest="bench_clone_depth")
+    run_p.add_argument("--no-suggestions", action="store_true", dest="bench_no_suggestions")
 
     # Use parse_known_args so `run` can pass through skill-specific flags that
     # are not explicitly registered at the top-level CLI parser.

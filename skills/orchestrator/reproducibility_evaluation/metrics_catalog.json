@@ -1,0 +1,241 @@
+{
+  "version": "1.0.0",
+  "generated_by": "skills/orchestrator/benchmark_evaluation/benchmark_evaluation.py",
+  "benchmark_types": {
+    "integration": {
+      "description": "Metrics for multi-dataset integration quality and batch harmonization.",
+      "metrics": [
+        {
+          "name": "integration_silhouette_score",
+          "display_name": "Integration Silhouette Score",
+          "description": "Measure of joint cluster separation after integration.",
+          "category": "quality"
+        },
+        {
+          "name": "batch_mixing_score",
+          "display_name": "Batch Mixing Score",
+          "description": "How well different batches mix after integration.",
+          "category": "batch-correction"
+        },
+        {
+          "name": "lisi_integration",
+          "display_name": "LISI Integration Score",
+          "description": "Local inverse Simpson's index for batch mixing and biology preservation.",
+          "category": "batch-correction"
+        },
+        {
+          "name": "graph_connectivity",
+          "display_name": "Graph Connectivity",
+          "description": "Connectivity of cell neighborhoods across batches.",
+          "category": "quality"
+        }
+      ]
+    },
+    "clustering": {
+      "description": "Metrics for unsupervised clustering evaluation.",
+      "metrics": [
+        {
+          "name": "adjusted_rand_index",
+          "display_name": "Adjusted Rand Index",
+          "description": "Agreement between inferred clusters and reference labels.",
+          "category": "clustering"
+        },
+        {
+          "name": "normalized_mutual_information",
+          "display_name": "Normalized Mutual Information",
+          "description": "Information theoretic similarity between cluster assignments.",
+          "category": "clustering"
+        },
+        {
+          "name": "silhouette_score",
+          "display_name": "Silhouette Score",
+          "description": "Clustering compactness and separation.",
+          "category": "quality"
+        }
+      ]
+    },
+    "annotation": {
+      "description": "Metrics for cell type annotation and label transfer accuracy.",
+      "metrics": [
+        {
+          "name": "annotation_accuracy",
+          "display_name": "Annotation Accuracy",
+          "description": "Fraction of correctly assigned cell type labels.",
+          "category": "classification"
+        },
+        {
+          "name": "f1_macro",
+          "display_name": "Macro F1 Score",
+          "description": "Balanced classification performance across cell types.",
+          "category": "classification"
+        },
+        {
+          "name": "label_transfer_score",
+          "display_name": "Label Transfer Score",
+          "description": "Accuracy of transferring labels between datasets.",
+          "category": "classification"
+        }
+      ]
+    },
+    "spatial": {
+      "description": "Spatial analysis metrics for domain detection and spatial autocorrelation.",
+      "metrics": [
+        {
+          "name": "morans_i",
+          "display_name": "Moran's I",
+          "description": "Spatial autocorrelation of gene or feature expression.",
+          "category": "spatial"
+        },
+        {
+          "name": "domain_separation",
+          "display_name": "Domain Separation Score",
+          "description": "How cleanly spatial domains separate in analysis space.",
+          "category": "spatial"
+        },
+        {
+          "name": "spatial_autocorrelation",
+          "display_name": "Spatial Autocorrelation",
+          "description": "General spatial pattern strength across genes or domains.",
+          "category": "spatial"
+        }
+      ]
+    },
+    "batch_correction": {
+      "description": "Metrics for batch correction performance.",
+      "metrics": [
+        {
+          "name": "kbet",
+          "display_name": "kBET",
+          "description": "Batch mixing quality test for corrected embeddings.",
+          "category": "batch-correction"
+        },
+        {
+          "name": "asw_batch",
+          "display_name": "ASW Batch",
+          "description": "Average silhouette width with batch labels.",
+          "category": "batch-correction"
+        },
+        {
+          "name": "batch_entropy",
+          "display_name": "Batch Entropy Score",
+          "description": "Entropy of batch labels across local neighborhoods.",
+          "category": "batch-correction"
+        }
+      ]
+    },
+    "trajectory": {
+      "description": "Metrics for trajectory inference and pseudotime accuracy.",
+      "metrics": [
+        {
+          "name": "trajectory_correlation",
+          "display_name": "Trajectory Correlation",
+          "description": "Correlation between inferred pseudotime and reference ordering.",
+          "category": "trajectory"
+        },
+        {
+          "name": "kendall_tau",
+          "display_name": "Kendall's Tau",
+          "description": "Rank correlation of cell ordering along trajectories.",
+          "category": "trajectory"
+        }
+      ]
+    },
+    "denoising": {
+      "description": "Metrics for denoising and noise reduction quality.",
+      "metrics": [
+        {
+          "name": "signal_to_noise_ratio",
+          "display_name": "Signal-to-Noise Ratio",
+          "description": "Signal preservation relative to technical noise.",
+          "category": "denoising"
+        },
+        {
+          "name": "gene_detection_rate",
+          "display_name": "Gene Detection Rate",
+          "description": "Preservation of detected genes after denoising.",
+          "category": "denoising"
+        }
+      ]
+    },
+    "imputation": {
+      "description": "Metrics for imputation accuracy and recovery.",
+      "metrics": [
+        {
+          "name": "imputation_rmse",
+          "display_name": "Imputation RMSE",
+          "description": "Root mean squared error between imputed and true values.",
+          "category": "imputation"
+        },
+        {
+          "name": "expression_correlation",
+          "display_name": "Expression Correlation",
+          "description": "Correlation of gene expression before and after imputation.",
+          "category": "imputation"
+        }
+      ]
+    },
+    "celltype": {
+      "description": "Metrics for cell type identification and marker performance.",
+      "metrics": [
+        {
+          "name": "celltype_accuracy",
+          "display_name": "Cell Type Accuracy",
+          "description": "Match rate between predicted and reference cell types.",
+          "category": "celltype"
+        },
+        {
+          "name": "marker_recall",
+          "display_name": "Marker Recall",
+          "description": "Ability to recover known marker genes for each cell type.",
+          "category": "celltype"
+        }
+      ]
+    },
+    "multiome": {
+      "description": "Metrics for multiome modality alignment and concordance.",
+      "metrics": [
+        {
+          "name": "modality_alignment",
+          "display_name": "Modality Alignment Score",
+          "description": "Agreement between RNA and ATAC modalities in joint embedding.",
+          "category": "multiome"
+        },
+        {
+          "name": "joint_clustering_score",
+          "display_name": "Joint Clustering Score",
+          "description": "Quality of joint clusters formed across modalities.",
+          "category": "multiome"
+        }
+      ]
+    },
+    "generic": {
+      "description": "General benchmark evaluation metrics for reproducibility workflows.",
+      "metrics": [
+        {
+          "name": "repository_discoverability",
+          "display_name": "Repository Discoverability",
+          "description": "Whether a code repository can be located from paper or metadata.",
+          "category": "reproducibility"
+        },
+        {
+          "name": "clone_reliability",
+          "display_name": "Clone Reliability",
+          "description": "Success rate of cloning identified repositories.",
+          "category": "reproducibility"
+        },
+        {
+          "name": "environment_build_success",
+          "display_name": "Environment Build Success",
+          "description": "Whether declared dependencies can be installed successfully.",
+          "category": "reproducibility"
+        },
+        {
+          "name": "execution_coverage",
+          "display_name": "Execution Coverage",
+          "description": "Degree to which published reproduction steps can be executed end-to-end.",
+          "category": "reproducibility"
+        }
+      ]
+    }
+  }
+}
