@@ -1,0 +1,59 @@
+OmicsClaw 项目中文总结
+
+1. 项目概述
+- OmicsClaw 是一个面向多组学分析的本地优先 AI 研究助手。
+- 通过统一的技能运行器、对话式交互、记忆管理和远程执行，支持多组学分析工作流的持续推进。
+- 当前版本为 v0.1.1，文档和代码支持 CLI、TUI、App 后端、Bot 前端等多种交互方式。
+- 该仓库内置技能目录可生成 89 个技能（skills/catalog.json），覆盖空间转录组、单细胞、基因组、蛋白组、代谢组、Bulk RNA-seq、编排等领域。
+
+2. 关键入口文件
+- omicsclaw.py
+  - 仓库的主入口脚本，提供命令行接口：list/run/interactive/tui/mcp/auth 等命令。
+  - 负责加载技能注册表、解析 skill 目录、运行技能脚本、处理服务依赖检查和 OAuth 认证。
+  - 支持本地技能运行、交互会话、文本用户界面和远程服务器管理。
+
+- bot/core.py
+  - Bot 前端的共享核心引擎，封装消息处理、LLM 运行时、技能执行和安全审计。
+  - 提供通用的路径与工作区解析、输出收集、工具执行上下文、LLM 超时策略和 provider 运行时管理。
+  - 该模块支撑 Telegram、飞书 等渠道，使不同前端共享同一套业务逻辑。
+
+- omicsclaw/core/registry.py
+  - 技能注册表组件，负责动态发现 skills/ 目录中的技能。
+  - 读取 SKILL.md YAML 前端信息并合并硬编码 fallback 元数据。
+  - 支持域名目录、子域名嵌套、技能别名、legacy alias、脚本解析和演示命令生成。
+
+- scripts/generate_catalog.py
+  - 从 skills/ 子目录中的 SKILL.md 前端信息生成 skills/catalog.json。
+  - 该脚本可用于检查目录是否过期，并为 CLI 技能列表提供元数据。
+
+3. 代码结构与模块功能
+- `omicsclaw/` 目录
+  - 主程序包，包含核心运行时、技能注册、提供者管理、报告和工具支持。
+  - 关键子模块包括 `core/`、`runtime/`、`common/`、`runtime/bot_tools` 等。
+
+- `bot/` 目录
+  - Bot 前端实现，包含跨渠道消息适配和异步处理逻辑。
+  - `bot/core.py` 是核心引擎，其他渠道前端会基于它构建具体消息处理流程。
+
+- `skills/` 目录
+  - 存放实际分析技能目录，每个技能通常包含 SKILL.md、Python 脚本和测试。
+  - 技能目录结构支持直接技能目录或子域名容器。
+
+- `README.md` 和 `README_zh-CN.md`
+  - 提供项目概述、安装方式、功能亮点以及使用指南。
+  - 中文文档已包含本地优先、记忆系统、多模型后端、多通道接入等说明。
+
+- `pyproject.toml`
+  - 定义 Python 包元数据：name=omicsclaw、version=0.1.1、Python>=3.11,<3.14。
+  - 核心依赖非常精简，复杂的生信工具依赖主要通过 `environment.yml` 和 `0_setup_env.sh` 安装。
+  - Optional extras 包括 `spatial-domains`、`spatial`、`singlecell`、`singlecell-clustering` 等。
+
+4. 设计特点
+- 本地优先架构：原始数据保留在本地或远程运行时，不通过云端上传。
+- 技能驱动：分析能力通过技能目录模块化，支持自然语言路由到具体分析技能。
+- 记忆与会话连续性：项目强调跨会话保存上下文、分析历史和用户偏好。
+- 扩展与兼容性：支持 MCP 外部工具、OAuth 提供者、远程 SSH 运行和桌面/浏览器后端。
+- 可复现性：技能输出标准化，为报告、Notebook 导出和分析血缘提供支持。
+
+5. 结论
+OmicsClaw 是一个结构化的多组学分析平台，核心代码围绕技能注册、运行时调度、对话式交互和 Bot 前端构建。它不是简单的单一分析脚本，而是一个支持本地/远程、CLI/GUI/Bot、多模型和记忆增强的科研助手框架。

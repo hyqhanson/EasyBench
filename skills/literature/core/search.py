@@ -38,6 +38,7 @@ def fetch_pubmed_article(pmid: str) -> Dict[str, str]:
         journal = _extract_single(xml, r'<Title>(.*?)</Title>')
         author_pairs = re.findall(r'<LastName>(.*?)</LastName>\s*<ForeName>(.*?)</ForeName>', xml)
         authors = ', '.join(f'{ln} {fn}' for ln, fn in author_pairs)
+        doi = _extract_single(xml, r'<ArticleId[^>]*IdType="doi"[^>]*>(.*?)</ArticleId>')
 
         return {
             'pmid': pmid,
@@ -45,6 +46,7 @@ def fetch_pubmed_article(pmid: str) -> Dict[str, str]:
             'abstract': abstract,
             'journal': journal,
             'authors': authors,
+            'doi': doi,
         }
     except Exception:
         return {}

@@ -97,6 +97,11 @@ def _call_llm(directive: str, system_prompt: str, temperature: float = 0.3,
             temperature=temperature,
             max_tokens=2048,
         )
+        if not result or not str(result).strip():
+            _audit_call(call_type, directive, system_prompt, result, None,
+                        'empty response', (_time_mod.time() - t0) * 1000)
+            logger.warning('LLM call returned empty response for %s.', call_type)
+            return None
         _audit_call(call_type, directive, system_prompt, result, None, None,
                     (_time_mod.time() - t0) * 1000)
         return result
@@ -133,13 +138,66 @@ def _extract_json_fragment(raw: str) -> Optional[str]:
     return raw[start:]
 
 
+def _repair_truncated_json(fragment: str) -> str:
+    repaired_chars: List[str] = []
+    stack: List[str] = []
+    in_string = False
+    escape = False
+
+    for ch in fragment:
+        if escape:
+            repaired_chars.append(ch)
+            escape = False
+            continue
+
+        if ch == '\\':
+            repaired_chars.append(ch)
+            escape = True
+            continue
+
+        if ch == '"':
+            repaired_chars.append(ch)
+            in_string = not in_string
+            continue
+
+        if in_string:
+            if ch == '\n' or ch == '\r':
+                repaired_chars.append(' ')
+            else:
+                repaired_chars.append(ch)
+            continue
+
+        if ch == '{':
+            stack.append('}')
+        elif ch == '[':
+            stack.append(']')
+        elif ch == '}' or ch == ']':
+            if stack and ch == stack[-1]:
+                stack.pop()
+        repaired_chars.append(ch)
+
+    if in_string:
+        repaired_chars.append('"')
+    while stack:
+        repaired_chars.append(stack.pop())
+
+    return ''.join(repaired_chars)
+
+
 def _parse_llm_json(raw: str) -> Optional[Any]:
+    fragment = _extract_json_fragment(raw)
+    if fragment is None:
+        return None
+
     try:
-        fragment = _extract_json_fragment(raw)
         return json.loads(fragment)
     except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning('LLM returned invalid JSON: %s | raw=%s', exc, raw[:500])
-        return None
+        repaired = _repair_truncated_json(fragment)
+        try:
+            return json.loads(repaired)
+        except (json.JSONDecodeError, TypeError) as exc2:
+            logger.warning('LLM returned invalid JSON: %s | raw=%s', exc2, raw[:500])
+            return None
 
 
 def _analysis_context(analysis_type: str) -> Tuple[str, str]:
@@ -202,15 +260,14 @@ def llm_generate_queries(benchmark_type: str, user_query: Optional[str] = None) 
         f"You are an expert in discovering single-cell omics datasets for reuse. "
         f"Generate 5 concise search queries for PubMed, arXiv, Google Scholar, GitHub, and Zenodo. "
         f"The goal is to find papers that contain or reference PUBLIC single-cell or spatial omics datasets "
-        f"(GEO accession IDs, SRA accessions, cellxgene collections, Zenodo records) "
-        f"suitable for a {benchmark_type} analysis.\n\n"
+        f"and associated code repositories, suitable for downstream reuse in {benchmark_type} data analysis.\n\n"
         f"Requirements:\n"
         f"- Return ONLY a JSON array of strings, no explanation.\n"
         f"- Queries must be under 200 chars each.\n"
-        f"- Focus on data availability, NOT on finding existing benchmarks.\n"
+        f"- Focus on papers reporting author-collected, first-hand single-cell or spatial omics data, and that also provide code for reuse.\n"
         f"- Target terminology: {focus}.\n"
-        f"- Include terms like \"dataset\", \"GEO\", \"GSE\", \"SRA\", \"public data\", "
-        f"\"single-cell\", \"scRNA-seq\", \"h5ad\", \"count matrix\".\n"
+        f"- Include terms like \"primary data\", \"author-collected\", \"original dataset\", \"de novo data\", \"GEO\", \"GSE\", \"SRA\", \"cellxgene\", "
+        f"\"Zenodo\", \"GitHub\", \"public data\", \"single-cell\", \"scRNA-seq\", \"h5ad\", \"code\".\n"
         f"- Do NOT use the word \"benchmark\" unless the user explicitly asked for it.\n"
     )
     if user_query:
@@ -234,7 +291,7 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
     prompt = (
         f"You are a scientific literature curator specialized in single-cell omics data discovery. "
         f"Analyze the following paper text to extract dataset accessions, code repositories, and "
-        f"biological metadata relevant for a downstream {benchmark_type} analysis.\n\n"
+        f"biological metadata relevant for downstream reuse in {benchmark_type} data analysis.\n\n"
         f"Paper text:\n{text[:16000]}\n\n"
         f"Return a JSON object with these exact keys:\n"
         f"  {{\n"
@@ -248,11 +305,14 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"    \"tissue\": \"...\",\n"
         f"    \"technology\": \"...\",\n"
         f"    \"benchmark_relevance_score\": 0-10,\n"
+        f"    \"data_origin\": \"author_collected\"|\"public_reanalysis\"|\"unclear\",\n"
+        f"    \"first_hand_data\": false,\n"
         f"    \"reason\": \"...\",\n"
         f"    \"methods_summary\": \"...\",\n"
         f"    \"code_snippets\": \"...\"\n"
         f"  }}\n\n"
         f"Use the terminology: {focus}.\n"
+        f"Score the paper by how likely it is to provide both reusable single-cell data and code/repositories, with preference for primary datasets collected by the authors themselves.\n"
         f"If the text contains no datasets, return empty arrays. Return ONLY valid JSON."
     )
 
@@ -269,7 +329,7 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
 
 
 def llm_rank_articles(candidates: List[Dict[str, Any]], benchmark_type: str) -> List[Dict[str, Any]]:
-    """Rank candidate literature items by benchmark relevance and confidence."""
+    """Rank candidate literature items by data and code availability, relevance, and confidence."""
     if not candidates:
         return []
 
@@ -287,28 +347,36 @@ def llm_rank_articles(candidates: List[Dict[str, Any]], benchmark_type: str) -> 
         f"You are ranking single-cell omics literature candidates for downstream {benchmark_type} analysis. "
         f"Review each item and return a JSON array of objects with keys: \"rank\", \"index\", \"confidence\" (0-100), \"reason\".\n"
         f"Prioritize papers that are MOST LIKELY to contain or reference public single-cell datasets "
-        f"(GEO, SRA, cellxgene, or Zenodo accessions) over papers that merely describe methods or benchmarks.\n\n"
+        f"(GEO, SRA, cellxgene, or Zenodo accessions) AND publicly available code repositories "
+        f"(GitHub, Zenodo, or other code archives).\n"
+        f"Prefer papers with author-collected, first-hand datasets rather than only secondary reanalysis or review datasets.\n"
+        f"The paper itself does not need to be a benchmark publication; rank it based on reusability of data and code.\n\n"
         f"Candidates:\n{joined_items}\n"
         f"Return ONLY valid JSON."
     )
     raw = _call_llm(prompt, system_prompt="You output only valid JSON arrays.",
                     temperature=0.2, call_type='rank_articles')
-    ranked = _parse_llm_json(raw)
-    _audit_record_parsed(ranked)
-    if isinstance(ranked, list):
-        indexed = {item.get('index'): item for item in ranked if isinstance(item, dict) and 'index' in item}
-        sorted_candidates = []
-        for idx in range(1, len(candidates) + 1):
-            if idx in indexed:
-                candidate = candidates[idx - 1].copy()
-                candidate['rank'] = indexed[idx].get('rank')
-                candidate['confidence'] = indexed[idx].get('confidence', 0)
-                candidate['rank_reason'] = indexed[idx].get('reason', '')
-                sorted_candidates.append(candidate)
-        sorted_candidates.sort(key=lambda x: (x.get('rank', 999), -int(x.get('confidence', 0))))
-        return sorted_candidates
+    if not raw:
+        logger.warning('LLM rank_articles did not return content; using original candidate order.')
+        return candidates
 
-    return candidates
+    ranked = _parse_llm_json(raw)
+    if not isinstance(ranked, list):
+        logger.warning('LLM rank_articles returned invalid JSON or unexpected structure; using original candidate order.')
+        return candidates
+
+    _audit_record_parsed(ranked)
+    indexed = {item.get('index'): item for item in ranked if isinstance(item, dict) and 'index' in item}
+    sorted_candidates = []
+    for idx in range(1, len(candidates) + 1):
+        if idx in indexed:
+            candidate = candidates[idx - 1].copy()
+            candidate['rank'] = indexed[idx].get('rank')
+            candidate['confidence'] = indexed[idx].get('confidence', 0)
+            candidate['rank_reason'] = indexed[idx].get('reason', '')
+            sorted_candidates.append(candidate)
+    sorted_candidates.sort(key=lambda x: (x.get('rank', 999), -int(x.get('confidence', 0))))
+    return sorted_candidates
 
 
 def _validate_accessions(ids: Any, pattern: str) -> List[str]:
@@ -475,7 +543,7 @@ def llm_collect_literature(
     benchmark_type: str,
     user_query: Optional[str] = None,
     max_results: int = 5,
-    enable_audit: bool = False,
+    enable_audit: bool = True,
 ) -> Dict[str, Any]:
     """Search literature and dataset sources using LLM-guided queries.
 
@@ -505,6 +573,7 @@ def _llm_collect_impl(
     """Actual implementation of LLM-powered literature collection."""
     from literature.core.search import search_pubmed, fetch_pubmed_article
     from literature.core.extractor import extract_metadata
+    from literature.core.parser import parse_doi
 
     queries = llm_generate_queries(benchmark_type, user_query)
     if not queries:
@@ -527,13 +596,24 @@ def _llm_collect_impl(
             article = fetch_pubmed_article(pmid)
             if not article or not article.get('title'):
                 continue
+            raw_text = f"Title: {article.get('title', '')}\n\nAbstract: {article.get('abstract', '')}"
+            doi = article.get('doi', '')
+            if doi:
+                try:
+                    doi_text = parse_doi(doi)
+                    if doi_text and not doi_text.startswith('Error fetching'):
+                        raw_text = raw_text + '\n\nDOI_PAGE_CONTENT:\n' + doi_text[:14000]
+                except Exception:
+                    logger.debug('Failed to fetch DOI page content for %s', doi, exc_info=True)
+
             candidate_items.append({
                 'title': article.get('title', ''),
                 'summary': article.get('abstract', ''),
                 'source': 'pubmed',
                 'id': pmid,
                 'url': f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/',
-                'raw_text': f"Title: {article.get('title', '')}\n\nAbstract: {article.get('abstract', '')}",
+                'doi': doi,
+                'raw_text': raw_text,
             })
 
     # ----- External sources (arxiv / zenodo / github / scholar) ----------
@@ -599,7 +679,11 @@ def _llm_collect_impl(
             organism = llm_data.get('organism', 'unknown')
             tissue = llm_data.get('tissue', 'unknown')
             technology = llm_data.get('technology', 'unknown')
-            relevance = llm_data.get('benchmark_relevance_score', 0)
+            relevance = llm_data.get('data_relevance_score')
+            if relevance is None:
+                relevance = llm_data.get('benchmark_relevance_score', 0)
+            else:
+                llm_data['benchmark_relevance_score'] = relevance
             llm_data = validate_accessions(llm_data)
         else:
             metadata = extract_metadata(text, benchmark_type)
@@ -612,8 +696,15 @@ def _llm_collect_impl(
             relevance = metadata.get('relevance_score', 0)
             llm_data = metadata
 
-        if not any((gse, sra, cellxgene)):
-            logger.info('Skipping candidate %s: no dataset accessions found.', candidate.get('id'))
+        github_repos = llm_data.get('github_repos', [])
+        zenodo_records = llm_data.get('zenodo_records', [])
+        has_data = bool(gse or sra or cellxgene)
+        has_code = bool(github_repos or zenodo_records)
+        if not has_data or not has_code:
+            logger.info(
+                'Skipping candidate %s: requires both dataset accessions and code/archive sources (data=%s, code=%s).',
+                candidate.get('id'), has_data, has_code,
+            )
             continue
 
         result = {
@@ -635,6 +726,8 @@ def _llm_collect_impl(
                 'zenodo_records': llm_data.get('zenodo_records', []),
                 'methods_summary': llm_data.get('methods_summary', ''),
                 'code_snippets': llm_data.get('code_snippets', ''),
+                'first_hand_data': llm_data.get('first_hand_data', False),
+                'data_origin': llm_data.get('data_origin', 'unclear'),
                 'benchmark_relevance_score': llm_data.get('benchmark_relevance_score', relevance),
             },
             'relevance_score': relevance,

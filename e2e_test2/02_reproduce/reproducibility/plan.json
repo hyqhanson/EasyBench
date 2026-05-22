@@ -1,0 +1,54 @@
+{
+  "input": "<p>The present dataset (dataset9) was used as input to build scFASTCORMICS models. The files correspond to the clusters identified by&nbsp;Seurat in the single-cell data from pancreas donor7&nbsp;downloaded from the GEO website&nbsp; (<strong>GSE114297).&nbsp;</strong></p>\n\n<p>&nbsp;</p>\n\n<p>see the protocol: scFASTCORMICS: A contextualization algorithm to reconstruct metabolic multi-cell population models from single-cell RNAseq data</p>\n\n<p>and github: <a href=\"https://github.com/sysbiolux/scFASTCORMICS\">https://github.com/sysbiolux/scFASTCORMICS</a></p>\n\n<p>For more information, version updates of the scFASTCORMICS.&nbsp;</p>",
+  "input_type": "text",
+  "benchmark_type": "integration",
+  "repositories": [
+    "https://github.com/sysbiolux/scFASTCORMICS"
+  ],
+  "datasets": {
+    "geo_accessions": {
+      "gse": [
+        "GSE114297"
+      ],
+      "gsm": [],
+      "gpl": []
+    },
+    "sra_accessions": [],
+    "cellxgene_accessions": [],
+    "organism": "rattus norvegicus",
+    "tissue": "pancreas",
+    "technology": "unknown",
+    "benchmark_type": "integration",
+    "relevance_score": 1
+  },
+  "extracted_steps": {
+    "method_sections": [],
+    "code_snippets": []
+  },
+  "reproduction_plan": [
+    "git clone https://github.com/sysbiolux/scFASTCORMICS.git",
+    "cd scFASTCORMICS",
+    "Rscript inst/scripts/run_scFASTCORMICS.R --input data/dataset9.rds --output results/",
+    "python analysis/plot_results.py --input results/models.rds --output figures/"
+  ],
+  "expected_outputs": [
+    "results/models.rds",
+    "results/gene_expression_clusters.csv",
+    "results/reactions_presence_absence.csv",
+    "figures/cluster_heatmap.pdf",
+    "figures/metabolic_network_pca.png"
+  ],
+  "steps": [
+    "parse_paper",
+    "discover_repositories",
+    "build_environment",
+    "execute_reproduction",
+    "verify_outputs"
+  ],
+  "environment": {
+    "no_clone": true,
+    "no_install": true,
+    "no_run": true,
+    "clone_depth": 1
+  }
+}

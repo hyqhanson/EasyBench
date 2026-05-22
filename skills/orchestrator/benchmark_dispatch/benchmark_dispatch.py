@@ -191,23 +191,17 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
         print(f"\n🤖 Using LLM-powered literature search for: {benchmark_type}")
         try:
             from literature.core.llm_collector import llm_collect_literature
-            llm_response = llm_collect_literature(
+            llm_results = llm_collect_literature(
                 benchmark_type,
                 user_query=search_queries[0] if search_queries else None,
                 enable_audit=True,
             )
-            llm_results = llm_response.get('results', [])
-            llm_audit = llm_response.get('audit', [])
-
-            # Save LLM audit trail (prompts, responses, timings, decisions)
-            if llm_audit:
-                (literature_dir / 'llm_audit.json').write_text(
-                    json.dumps(llm_audit, indent=2)
-                )
-
-            # Save full LLM results list
+            results = llm_results.get('results') if isinstance(llm_results, dict) else llm_results
+            audit_log = llm_results.get('audit') if isinstance(llm_results, dict) else []
             (literature_dir / 'llm_results.json').write_text(json.dumps(llm_results, indent=2))
-            for result in llm_results:
+            if audit_log:
+                (literature_dir / 'llm_audit.json').write_text(json.dumps(audit_log, indent=2))
+            for result in results or []:
                 # Identifier may be pmid/arxiv id/github id etc.
                 identifier = result.get('pmid') or result.get('id') or result.get('input', '')[:32]
                 title = result.get('input', result.get('title', ''))[:120]
@@ -220,7 +214,10 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
                     json.dumps(result, indent=2)
                 )
                 collected_data['literature_results'].append(result)
-                collected_data['total_relevance_score'] += result.get('relevance_score', 0) or result.get('metadata', {}).get('benchmark_relevance_score', 0)
+                score = result.get('relevance_score', 0)
+                if score == 0:
+                    score = result.get('metadata', {}).get('data_relevance_score', result.get('metadata', {}).get('benchmark_relevance_score', 0))
+                collected_data['total_relevance_score'] += score
         except Exception as e:
             print(f"  LLM collection failed ({e}), falling back to hardcoded search.")
             use_llm = False  # fallback to hardcoded below
@@ -259,12 +256,14 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
     # Aggregate datasets
     for result in collected_data['literature_results']:
         metadata = result.get('metadata', {})
-        collected_data['datasets']['geo'].extend(metadata.get('geo_accessions', {}).get('gse', []))
-        collected_data['datasets']['sra'].extend(metadata.get('sra_accessions', []))
-        collected_data['datasets']['cellxgene'].extend(metadata.get('cellxgene_accessions', []))
-        collected_data['datasets']['arxiv'].extend(metadata.get('arxiv_ids', []))
-        collected_data['datasets']['github'].extend(metadata.get('github_repos', []))
-        collected_data['datasets']['zenodo'].extend(metadata.get('zenodo_records', []))
+        # GEO / SRA / cellxgene
+        collected_data['datasets']['geo'].extend(metadata.get('geo_accessions', {}).get('gse', []) or metadata.get('geo_accessions', {}).get('gse', []))
+        collected_data['datasets']['sra'].extend(metadata.get('sra_accessions', []) or metadata.get('sra_accessions', []))
+        collected_data['datasets']['cellxgene'].extend(metadata.get('cellxgene_accessions', []) or metadata.get('cellxgene_accessions', []))
+        # New sources
+        collected_data['datasets']['arxiv'].extend(metadata.get('arxiv_ids', []) or metadata.get('arxiv_ids', []))
+        collected_data['datasets']['github'].extend(metadata.get('github_repos', []) or metadata.get('github_repos', []))
+        collected_data['datasets']['zenodo'].extend(metadata.get('zenodo_records', []) or metadata.get('zenodo_records', []))
     
     # Remove duplicates
     for key in collected_data['datasets']:
@@ -325,16 +324,13 @@ def process_literature_input(input_text: str, benchmark_type: str,
 - Relevance Score: {metadata.get('relevance_score', 0)}
 
 ## Datasets
-- GEO: {metadata.get('geo_accessions', {}).get('gse', [])}
-- SRA: {metadata.get('sra_accessions', [])}
-- cellxgene: {metadata.get('cellxgene_accessions', [])}
-- arXiv: {metadata.get('arxiv_ids', [])}
-- GitHub repos: {metadata.get('github_repos', [])}
-- Zenodo: {metadata.get('zenodo_records', [])}
+- GEO: {metadata.get('geo_accessions', {}).get('gse', []) or 'None found'}
+- SRA: {metadata.get('sra_accessions', []) or 'None found'}
+- cellxgene: {metadata.get('cellxgene_accessions', []) or 'None found'}
 
-## Extracted Information
-- Methods: {metadata.get('methods_summary', 'N/A')[:500]}
-- Code snippets: {metadata.get('code_snippets', 'N/A')[:500]}
+## Codes
+- GitHub: {metadata.get('github_repos', []) or 'None found'}
+- Zenodo: {metadata.get('zenodo_records', []) or 'None found'}
 """
         report_file.write_text(report)
         
@@ -415,13 +411,6 @@ def process_pubmed_article(article: Dict[str, str], benchmark_type: str,
 - GEO: {metadata.get('geo_accessions', {}).get('gse', [])}
 - SRA: {metadata.get('sra_accessions', [])}
 - cellxgene: {metadata.get('cellxgene_accessions', [])}
-- arXiv: {metadata.get('arxiv_ids', [])}
-- GitHub repos: {metadata.get('github_repos', [])}
-- Zenodo: {metadata.get('zenodo_records', [])}
-
-## Extracted Information
-- Methods: {metadata.get('methods_summary', 'N/A')[:500]}
-- Code snippets: {metadata.get('code_snippets', 'N/A')[:500]}
 """
         report_file.write_text(report)
 
@@ -529,9 +518,6 @@ def generate_workflow_plan(benchmark_type: str, collected_data: Dict) -> Dict:
         'geo_datasets': len(datasets.get('geo', [])),
         'sra_datasets': len(datasets.get('sra', [])),
         'cellxgene_datasets': len(datasets.get('cellxgene', [])),
-        'arxiv_datasets': len(datasets.get('arxiv', [])),
-        'github_datasets': len(datasets.get('github', [])),
-        'zenodo_datasets': len(datasets.get('zenodo', [])),
         'downloaded_geo': len(downloaded.get('geo', [])),
         'downloaded_sra': len(downloaded.get('sra', [])),
         'downloaded_cellxgene': len(downloaded.get('cellxgene', [])),
@@ -564,12 +550,6 @@ def save_results(workflow_plan: Dict, collected_data: Dict, output_dir: Path):
   - {', '.join(collected_data['datasets']['sra'])}
 - **cellxgene Datasets**: {len(collected_data['datasets']['cellxgene'])}
   - {', '.join(collected_data['datasets']['cellxgene'])}
-- **arXiv IDs**: {len(collected_data['datasets'].get('arxiv', []))}
-  - {', '.join(collected_data['datasets'].get('arxiv', []))}
-- **GitHub repos**: {len(collected_data['datasets'].get('github', []))}
-  - {', '.join(collected_data['datasets'].get('github', []))}
-- **Zenodo records**: {len(collected_data['datasets'].get('zenodo', []))}
-  - {', '.join(collected_data['datasets'].get('zenodo', []))}
 
 ## Downloaded Candidate Data
 - **GEO downloaded**: {len(collected_data.get('downloaded_datasets', {}).get('geo', []))}
