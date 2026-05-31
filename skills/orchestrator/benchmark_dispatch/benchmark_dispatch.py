@@ -263,7 +263,9 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
         # New sources
         collected_data['datasets']['arxiv'].extend(metadata.get('arxiv_ids', []) or metadata.get('arxiv_ids', []))
         collected_data['datasets']['github'].extend(metadata.get('github_repos', []) or metadata.get('github_repos', []))
-        collected_data['datasets']['zenodo'].extend(metadata.get('zenodo_records', []) or metadata.get('zenodo_records', []))
+        collected_data['datasets']['zenodo'].extend(
+            metadata.get('zenodo_data', []) or metadata.get('zenodo_records', [])
+        )
     
     # Remove duplicates
     for key in collected_data['datasets']:
@@ -277,6 +279,7 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
             r.get('metadata', {}).get('geo_accessions', {}).get('gse', [])
             or r.get('metadata', {}).get('sra_accessions', [])
             or r.get('metadata', {}).get('cellxgene_accessions', [])
+            or r.get('metadata', {}).get('zenodo_data', [])
         )
     ]
     after = len(collected_data['literature_results'])

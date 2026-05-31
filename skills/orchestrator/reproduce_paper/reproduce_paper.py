@@ -818,7 +818,7 @@ def write_report(reproducibility_dir: Path, plan: Dict, result: Dict) -> None:
             f"reason={run.get('reason', env.get('error', 'unknown'))}"
         )
 
-    (reproducibility_dir / 'report.md').write_text('\n'.join(report) + '\n')
+    (reproducibility_dir / 'report.md').write_text('\n'.join(report) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':

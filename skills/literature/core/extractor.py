@@ -29,16 +29,41 @@ def extract_sra_accessions(text: str) -> List[str]:
 
 
 def extract_cellxgene_accessions(text: str) -> List[str]:
-    """Extract cellxgene dataset slugs from text or URLs."""
+    """Extract cellxgene dataset UUIDs from URLs or plain text.
+
+    Recognises three URL patterns:
+      - Collection:  cellxgene.cziscience.com/collections/{uuid}
+      - Direct data: datasets.cellxgene.cziscience.com/{uuid}.h5ad
+      - Legacy:      cellxgene.cziscience.com/d/{slug}
+    Also catches bare UUIDs that appear near "cellxgene".
+    """
+    UUID_PATTERN = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
     dataset_ids: List[str] = []
-    for match in re.findall(r'https?://(?:www\.)?cellxgene\.[^/]+/d/([A-Za-z0-9_\-]+)', text, re.IGNORECASE):
+
+    # 1. Collection URLs → extract the collection UUID
+    for match in re.findall(
+        rf'https?://(?:www\.)?cellxgene\.cziscience\.com/collections/({UUID_PATTERN})',
+        text, re.IGNORECASE,
+    ):
         dataset_ids.append(match)
 
-    if 'cellxgene' in text.lower():
-        plain_matches = re.findall(r'\b([A-Za-z0-9_\-]{6,})\b', text)
-        for candidate in plain_matches:
-            if candidate.lower().startswith('cxg') and candidate not in dataset_ids:
-                dataset_ids.append(candidate)
+    # 2. Direct download URLs → extract the dataset UUID before .h5ad
+    for match in re.findall(
+        rf'https?://datasets\.cellxgene\.cziscience\.com/({UUID_PATTERN})\.h5ad',
+        text, re.IGNORECASE,
+    ):
+        dataset_ids.append(match)
+
+    # 3. Legacy /d/{slug} format
+    for match in re.findall(
+        r'https?://(?:www\.)?cellxgene\.[^/]+/d/([A-Za-z0-9_\-]+)',
+        text, re.IGNORECASE,
+    ):
+        dataset_ids.append(match)
+
+    # 4. Bare UUIDs near the word "cellxgene" (LLM extraction output)
+    for match in re.findall(rf'\b({UUID_PATTERN})\b', text):
+        dataset_ids.append(match)
 
     return list(dict.fromkeys(dataset_ids))
 

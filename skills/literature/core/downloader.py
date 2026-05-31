@@ -182,14 +182,27 @@ def _sra_accession_to_ftp_url(accession: str) -> str:
 
 
 def download_cellxgene_dataset(dataset_id: str, output_dir: Path, max_retries: int = 3) -> Dict:
-    """Download metadata and candidate files for a cellxgene dataset."""
+    """Download metadata and data files for a cellxgene dataset or collection.
+
+    *dataset_id* accepts:
+      - Bare dataset UUID  (e.g. ``329c91df-1383-4dea-8e29-5b5f25da9178``)
+      - Collection URL     (e.g. ``https://cellxgene.cziscience.com/collections/{uuid}``)
+      - Direct .h5ad URL   (e.g. ``https://datasets.cellxgene.cziscience.com/{uuid}.h5ad``)
+    """
     dataset_id = dataset_id.strip()
-    slug = normalize_cellxgene_id(dataset_id)
-    dataset_dir = output_dir / slug
+    normalized = normalize_cellxgene_id(dataset_id)
+
+    # If it's a direct download URL, use the UUID as folder name
+    if normalized.startswith('http') and normalized.endswith('.h5ad'):
+        folder = re.sub(r'[^\w\-]+', '_', normalized.split('/')[-1].replace('.h5ad', ''))
+    else:
+        folder = normalized
+
+    dataset_dir = output_dir / folder
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     result = {
-        'cellxgene_id': slug,
+        'cellxgene_id': normalized,
         'source': 'cellxgene',
         'status': 'pending',
         'files': [],
@@ -197,10 +210,10 @@ def download_cellxgene_dataset(dataset_id: str, output_dir: Path, max_retries: i
     }
 
     try:
-        metadata = fetch_cellxgene_metadata(slug)
-        if not metadata:
+        metadata = fetch_cellxgene_metadata(dataset_id)
+        if not metadata or not metadata.get('download_urls'):
             result['status'] = 'failed'
-            result['errors'].append(f"Could not fetch metadata for {slug}")
+            result['errors'].append(f"Could not fetch metadata for {dataset_id}")
             return result
 
         metadata_file = dataset_dir / 'metadata.json'
@@ -222,33 +235,130 @@ def download_cellxgene_dataset(dataset_id: str, output_dir: Path, max_retries: i
     return result
 
 
+UUID_PATTERN = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+CELLXGENE_API = 'https://api.cellxgene.cziscience.com'
+DIRECT_DL_BASE = 'https://datasets.cellxgene.cziscience.com'
+
+
 def normalize_cellxgene_id(value: str) -> str:
+    """Normalise a cellxgene identifier to a plain UUID or direct .h5ad URL.
+
+    Accepts:
+      - Bare UUID (329c91df-...)
+      - Collection URL (https://cellxgene.cziscience.com/collections/{uuid})
+      - Direct download URL (https://datasets.cellxgene.cziscience.com/{uuid}.h5ad)
+      - Legacy dataset page (/d/{slug})
+    """
     value = value.strip()
-    match = re.search(r'/d/([A-Za-z0-9_\-]+)', value)
-    if match:
-        return match.group(1)
+
+    # Already a direct .h5ad URL → return as-is
+    if value.startswith('http') and value.endswith('.h5ad'):
+        return value
+
+    # Extract UUID from any cellxgene URL
+    m = re.search(rf'({UUID_PATTERN})', value, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+
+    # Legacy /d/{slug}
+    m = re.search(r'/d/([A-Za-z0-9_\-]+)', value)
+    if m:
+        return m.group(1)
+
+    # Maybe it's already a plain UUID without hyphens? (unlikely but safe)
+    m = re.search(r'\b([0-9a-fA-F]{32})\b', value)
+    if m:
+        raw = m.group(1)
+        return f'{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}'
+
     return value
 
 
-def fetch_cellxgene_metadata(slug: str) -> Dict:
-    """Fetch metadata and candidate download URLs from cellxgene pages."""
-    page_url = f"https://cellxgene.cziscience.com/d/{slug}"
-    metadata = {'dataset_slug': slug, 'page_url': page_url, 'download_urls': []}
+def fetch_cellxgene_metadata(identifier: str) -> Dict:
+    """Fetch metadata and download URLs from cellxgene.
 
+    *identifier* can be:
+      - A dataset UUID (constructs direct download URL)
+      - A collection UUID (fetches collection API to list datasets)
+      - A legacy /d/{slug} (scrapes the old dataset page)
+      - A direct .h5ad URL (used as-is)
+    """
+    meta: Dict = {
+        'id': identifier,
+        'title': '',
+        'page_url': '',
+        'download_urls': [],
+        'is_collection': False,
+    }
+
+    # --- Case 1: already a direct .h5ad URL ---
+    if identifier.startswith('http') and identifier.endswith('.h5ad'):
+        meta['download_urls'] = [identifier]
+        meta['page_url'] = identifier
+        return meta
+
+    # --- Case 2: collection UUID (via API) ---
+    coll_match = re.search(rf'collections/({UUID_PATTERN})', identifier, re.IGNORECASE)
+    if coll_match or _looks_like_uuid(identifier):
+        uuid = (coll_match.group(1) if coll_match else identifier).lower()
+        meta['id'] = uuid
+        meta['page_url'] = f'https://cellxgene.cziscience.com/collections/{uuid}'
+
+        # First try collection API
+        try:
+            resp = requests.get(f'{CELLXGENE_API}/dp/v1/collections/{uuid}', timeout=30)
+            if resp.ok:
+                data = resp.json()
+                meta['title'] = data.get('name', '') or data.get('title', '')
+                datasets = data.get('datasets', data.get('collections', []))
+                for ds in datasets:
+                    ds_id = ds.get('dataset_id', ds.get('id', ''))
+                    if ds_id:
+                        meta['download_urls'].append(f'{DIRECT_DL_BASE}/{ds_id}.h5ad')
+                if meta['download_urls']:
+                    return meta
+        except Exception:
+            pass
+
+        # Fallback: treat the uuid as a single dataset ID
+        try:
+            resp = requests.get(f'{CELLXGENE_API}/dp/v1/datasets/{uuid}', timeout=30)
+            if resp.ok:
+                data = resp.json()
+                meta['title'] = data.get('name', '') or data.get('title', '')
+                for asset in data.get('assets', []):
+                    url = asset.get('url', asset.get('file_url', ''))
+                    if url:
+                        meta['download_urls'].append(url)
+                if meta['download_urls']:
+                    return meta
+        except Exception:
+            pass
+
+        # Final fallback: construct direct download URL
+        meta['download_urls'] = [f'{DIRECT_DL_BASE}/{uuid}.h5ad']
+        return meta
+
+    # --- Case 3: legacy /d/{slug} (scrape) ---
+    slug = identifier
+    page_url = f'https://cellxgene.cziscience.com/d/{slug}'
+    meta['page_url'] = page_url
     try:
-        response = requests.get(page_url, timeout=30)
-        response.raise_for_status()
-        html = response.text
-
-        download_urls = set(re.findall(r'https?://[^"\']+\.(?:h5ad|cxg|zip|tar\.gz|json)', html, re.IGNORECASE))
-        metadata['download_urls'] = sorted(download_urls)
-        metadata['title'] = slug
-
-        return metadata
-
+        resp = requests.get(page_url, timeout=30)
+        resp.raise_for_status()
+        html = resp.text
+        meta['title'] = slug
+        urls = set(re.findall(r'https?://[^"\']+\.(?:h5ad|cxg|zip|tar\.gz|json)', html, re.IGNORECASE))
+        meta['download_urls'] = sorted(urls)
     except Exception as e:
-        print(f"Error fetching cellxgene metadata for {slug}: {e}")
-        return {}
+        print(f'Error fetching cellxgene legacy page for {slug}: {e}')
+
+    return meta
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """Check if a string looks like a UUID (with or without hyphens)."""
+    return bool(re.match(rf'^{UUID_PATTERN}$', value, re.IGNORECASE))
 
 
 def _download_file(url: str, output_file: Path, max_retries: int = 3) -> bool:
