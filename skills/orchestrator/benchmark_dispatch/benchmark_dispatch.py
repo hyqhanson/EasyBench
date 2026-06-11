@@ -191,17 +191,20 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
         print(f"\n🤖 Using LLM-powered literature search for: {benchmark_type}")
         try:
             from literature.core.llm_collector import llm_collect_literature
+            import time as _time
+            _t0 = _time.time()
             llm_results = llm_collect_literature(
                 benchmark_type,
                 user_query=search_queries[0] if search_queries else None,
-                enable_audit=True,
             )
-            results = llm_results.get('results') if isinstance(llm_results, dict) else llm_results
-            audit_log = llm_results.get('audit') if isinstance(llm_results, dict) else []
+            # Save full LLM results list and audit trail
             (literature_dir / 'llm_results.json').write_text(json.dumps(llm_results, indent=2))
-            if audit_log:
-                (literature_dir / 'llm_audit.json').write_text(json.dumps(audit_log, indent=2))
-            for result in results or []:
+            if isinstance(llm_results, dict) and 'audit' in llm_results:
+                (literature_dir / 'llm_audit.json').write_text(json.dumps(llm_results['audit'], indent=2))
+            results_list = llm_results.get('results', llm_results) if isinstance(llm_results, dict) else llm_results
+            _elapsed = _time.time() - _t0
+            print(f"\n  📊 LLM search complete: {len(results_list)} papers in {_elapsed:.0f}s")
+            for result in results_list:
                 # Identifier may be pmid/arxiv id/github id etc.
                 identifier = result.get('pmid') or result.get('id') or result.get('input', '')[:32]
                 title = result.get('input', result.get('title', ''))[:120]
@@ -214,10 +217,13 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
                     json.dumps(result, indent=2)
                 )
                 collected_data['literature_results'].append(result)
-                score = result.get('relevance_score', 0)
-                if score == 0:
-                    score = result.get('metadata', {}).get('data_relevance_score', result.get('metadata', {}).get('benchmark_relevance_score', 0))
-                collected_data['total_relevance_score'] += score
+                collected_data['total_relevance_score'] += result.get('relevance_score', 0) or result.get('metadata', {}).get('benchmark_relevance_score', 0)
+            # Print acceptance summary
+            _acc = {}
+            for r in results_list:
+                _acc[r.get('acceptance', 'UNKNOWN')] = _acc.get(r.get('acceptance', 'UNKNOWN'), 0) + 1
+            _acc_str = ' · '.join(f'{k}={v}' for k, v in sorted(_acc.items()))
+            print(f"  📊 Acceptance: {_acc_str}")
         except Exception as e:
             print(f"  LLM collection failed ({e}), falling back to hardcoded search.")
             use_llm = False  # fallback to hardcoded below
@@ -263,9 +269,7 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
         # New sources
         collected_data['datasets']['arxiv'].extend(metadata.get('arxiv_ids', []) or metadata.get('arxiv_ids', []))
         collected_data['datasets']['github'].extend(metadata.get('github_repos', []) or metadata.get('github_repos', []))
-        collected_data['datasets']['zenodo'].extend(
-            metadata.get('zenodo_data', []) or metadata.get('zenodo_records', [])
-        )
+        collected_data['datasets']['zenodo'].extend(metadata.get('zenodo_records', []) or metadata.get('zenodo_records', []))
     
     # Remove duplicates
     for key in collected_data['datasets']:
@@ -279,7 +283,6 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
             r.get('metadata', {}).get('geo_accessions', {}).get('gse', [])
             or r.get('metadata', {}).get('sra_accessions', [])
             or r.get('metadata', {}).get('cellxgene_accessions', [])
-            or r.get('metadata', {}).get('zenodo_data', [])
         )
     ]
     after = len(collected_data['literature_results'])
@@ -327,13 +330,9 @@ def process_literature_input(input_text: str, benchmark_type: str,
 - Relevance Score: {metadata.get('relevance_score', 0)}
 
 ## Datasets
-- GEO: {metadata.get('geo_accessions', {}).get('gse', []) or 'None found'}
-- SRA: {metadata.get('sra_accessions', []) or 'None found'}
-- cellxgene: {metadata.get('cellxgene_accessions', []) or 'None found'}
-
-## Codes
-- GitHub: {metadata.get('github_repos', []) or 'None found'}
-- Zenodo: {metadata.get('zenodo_records', []) or 'None found'}
+- GEO: {metadata.get('geo_accessions', {}).get('gse', [])}
+- SRA: {metadata.get('sra_accessions', [])}
+- cellxgene: {metadata.get('cellxgene_accessions', [])}
 """
         report_file.write_text(report)
         

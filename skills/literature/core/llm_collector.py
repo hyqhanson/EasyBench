@@ -179,9 +179,17 @@ def _repair_truncated_json(fragment: str) -> str:
     if in_string:
         repaired_chars.append('"')
     while stack:
+        # Strip trailing comma before a closing bracket (e.g. "false,}")
+        if repaired_chars and repaired_chars[-1] == ',':
+            repaired_chars[-1] = ' '
         repaired_chars.append(stack.pop())
 
-    return ''.join(repaired_chars)
+    result = ''.join(repaired_chars)
+    # Also strip any trailing comma that ended up right before a closing bracket
+    # (e.g. from the original fragment itself: `"first_hand_data": false,}`)
+    result = re.sub(r',\s*}', '}', result)
+    result = re.sub(r',\s*]', ']', result)
+    return result
 
 
 def _parse_llm_json(raw: str) -> Optional[Any]:
@@ -316,47 +324,55 @@ def _analysis_context(analysis_type: str) -> Tuple[str, str, str]:
 
 
 def llm_generate_queries(benchmark_type: str, user_query: Optional[str] = None) -> Optional[List[str]]:
-    """Use LLM to generate search queries for dataset discovery.
+    """Use LLM to generate search queries for biological discovery papers.
 
-    The goal is to find papers that contain *public single-cell omics datasets*
-    (GEO, SRA, cellxgene, etc.) relevant to the target analysis type.  The
-    benchmark itself is built *from* those datasets — we are searching for
-    the raw data, not for existing benchmark papers.
+    The goal is to find papers that (1) collected or integrated original single-cell
+    or spatial omics data AND (2) performed biological analysis to draw conclusions
+    about cell types, tissues, development, disease, or other biological phenomena.
+    We want primary research papers with data, NOT purely computational method papers.
     """
     focus, _, data_reqs = _analysis_context(benchmark_type)
     prompt = (
-        f"You are an expert in discovering single-cell omics datasets for reuse. "
+        f"You are an expert in discovering single-cell omics biological research papers. "
         f"Generate **12** concise search queries — **2 per source** — targeting "
-        f"PubMed, arXiv, Google Scholar, Semantic Scholar, bioRxiv/medRxiv, and Europe PMC. "
+        f"PubMed, arXiv, Semantic Scholar, bioRxiv/medRxiv, and Europe PMC. "
         f"Each query must be tailored to the source's strengths:\n\n"
-        f"- **PubMed / Europe PMC**: query by data accession patterns (GSE, SRP, GSE+topic) and "
-        f"author-collected single-cell datasets. Include MeSH-like terms.\n"
-        f"- **arXiv / bioRxiv**: query preprints with terms like \"single-cell\", \"dataset\", and "
-        f"\"code\" that often contain data links in the manuscript.\n"
-        f"- **Google Scholar**: query for academic papers that cite dataset accessions and "
-        f"mention code availability in the snippet.\n"
-        f"- **Semantic Scholar**: query for papers with high citation impact that "
-        f"reference public single-cell datasets and provide code.\n\n"
-        f"NOTE: GitHub, Zenodo, and Figshare are NOT search targets — they are "
-        f"data/code repositories, not literature databases. Do NOT generate queries "
-        f"for them.\n\n"
-        f"The overall goal: find papers that contain or reference PUBLIC single-cell or spatial omics datasets "
-        f"and associated code repositories, suitable for downstream reuse in {benchmark_type} data analysis.\n\n"
-        f"DATA REQUIREMENTS for {benchmark_type} analysis:\n"
-        f"{data_reqs}\n\n"
+        f"- **PubMed / Europe PMC**: query by biological topics + single-cell (e.g. cell atlas, "
+        f"tissue-specific transcriptomics, disease mechanism at single-cell resolution). "
+        f"Include GEO/GSE terms to find papers that deposited data.\n"
+        f"- **arXiv / bioRxiv**: query preprints reporting biological discoveries from "
+        f"single-cell data — cell atlases, tissue maps, developmental trajectories, "
+        f"disease signatures.\n"
+        f"- **Semantic Scholar**: query for highly-cited biological discovery papers "
+        f"that generated new single-cell datasets and reported biological findings.\n\n"
+        f"CRITICAL PRIORITY — find papers that:\n"
+        f"1. Collected or assembled original single-cell/spatial omics data (author-collected)\n"
+        f"2. Performed biological analysis: cell type characterization, tissue mapping, "
+        f"   developmental biology, disease mechanism, biomarker discovery, aging, etc.\n"
+        f"3. Deposited data to GEO/SRA/cellxgene/Zenodo\n"
+        f"\n"
+        f"DO NOT focus on:\n"
+        f"- Pure method/algorithm papers (new clustering, integration, imputation methods)\n"
+        f"- Benchmark papers comparing methods\n"
+        f"- Review papers or meta-analyses\n"
+        f"- Papers that only reanalyze existing public data without generating new biological insight\n"
+        f"\n"
+        f"NOTE: GitHub and Zenodo code are helpful signals but not the primary target — "
+        f"we want the BIOLOGICAL DISCOVERY paper itself.\n\n"
         f"Requirements:\n"
         f"- Return ONLY a JSON array of strings, no explanation.\n"
         f"- Each query must be under 200 chars.\n"
-        f"- Focus on papers reporting author-collected, first-hand single-cell or spatial omics data, and that also provide code for reuse.\n"
-        f"- Target terminology: {focus}.\n"
-        f"- Include terms like \"primary data\", \"author-collected\", \"original dataset\", \"de novo data\", \"GEO\", \"GSE\", \"SRA\", \"cellxgene\", "
-        f"\"Zenodo\", \"GitHub\", \"public data\", \"single-cell\", \"scRNA-seq\", \"h5ad\", \"code\".\n"
-        f"- Do NOT use the word \"benchmark\" unless the user explicitly asked for it.\n"
-        f"- AVOID terms that attract review papers (like \"survey\", \"review\", \"overview\", \"systematic\").\n"
-        f"  Only generate queries that would find ORIGINAL RESEARCH papers with datasets and code.\n"
-        f"- CRITICAL: Do NOT include source names (like \"PubMed\", \"arXiv\", \"bioRxiv\", \"Google Scholar\", \"Europe PMC\")\n"
-        f"  inside the query text itself. All 12 queries are reused across all search sources, so a query\n"
-        f"  containing \"arXiv\" would never match any bioRxiv paper. Keep queries generic and topic-focused.\n"
+        f"- Use biological discovery terms: cell atlas, tissue atlas, cell type, developmental, "
+        f"  differentiation, lineage, disease, mechanism, signature, heterogeneity, landscape, "
+        f"  map, trajectory, niche, microenvironment.\n"
+        f"- Include terms like \"single-cell\", \"scRNA-seq\", \"snRNA-seq\", \"spatial transcriptomics\", "
+        f"  \"GEO\", \"GSE\", \"cellxgene\" to ensure papers with deposited data.\n"
+        f"- Include \"human\" or \"mouse\" or specific tissues/organs to target biological studies.\n"
+        f"- Do NOT include method/algorithm keywords (\"integration\", \"batch correction\", "
+        f"  \"clustering\", \"imputation\", \"normalization\", \"embedding\", \"representation learning\").\n"
+        f"- AVOID terms that attract review papers (\"survey\", \"review\", \"overview\", \"systematic\").\n"
+        f"- CRITICAL: Do NOT include source names (like \"PubMed\", \"arXiv\", \"bioRxiv\", \"Europe PMC\")\n"
+        f"  inside the query text itself.\n"
     )
     if user_query:
         prompt += f"\nUser interest: {user_query}\n"
@@ -386,10 +402,16 @@ def llm_generate_queries(benchmark_type: str, user_query: Optional[str] = None) 
 def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[str, Any]]:
     """Use LLM to extract structured dataset and method details from paper text."""
     focus, _, data_reqs = _analysis_context(benchmark_type)
+    # Classify paper type from text
+    _is_method_paper = any(kw in text[:4000].lower() for kw in [
+        'we propose', 'we introduce', 'we present', 'our method', 'our framework',
+        'novel algorithm', 'novel method', 'we develop a', 'we designed',
+        'our approach achieves', 'state-of-the-art performance',
+    ])
     prompt = (
         f"You are a scientific literature curator specialized in single-cell omics data discovery. "
         f"Analyze the following paper text to extract dataset accessions, code repositories, and "
-        f"biological metadata relevant for downstream reuse in {benchmark_type} data analysis.\n\n"
+        f"biological metadata relevant for {benchmark_type} data analysis.\n\n"
         f"Paper text:\n{text[:16000]}\n\n"
         f"Return a JSON object with these exact keys:\n"
         f"  {{\n"
@@ -419,8 +441,21 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"  }}\n\n"
         f"Use the terminology: {focus}.\n"
         f"Scoring guidance:\n"
+        f"- First, determine if this is a BIOLOGICAL DISCOVERY paper or a COMPUTATIONAL METHOD paper.\\n"
+        f"  * Biological discovery: collected data, analyzed to understand biology (cell types, disease, development, tissue)\\n"
+        f"  * Computational method: proposes new algorithm/tool/framework, evaluates on existing data\\n"
         f"- Prefer papers that clearly state 'we generated', 'we collected', 'our dataset' → first_hand_data=true, data_origin='author_collected'.\n"
-        f"- Prefer papers that mention both (a) public dataset accessions (GSE, SRP, cellxgene, Zenodo datasets) AND (b) a code repository (GitHub, GitLab, Zenodo software archives, Figshare).\n"
+        f"- **CRITICAL: Look for 'Data Availability' and 'Code Availability' sections!**\n"
+        f"  Many biological discovery papers deposit data to GEO/SRA/cellxgene and state accessions in these sections.\n"
+        f"  Scan the text for phrases like:\n"
+        f"    * 'Data availability', 'Data deposition', 'Accession numbers', 'Data are available'\n"
+        f"    * 'Code availability', 'Code is available at', 'Source code', 'Software availability'\n"
+        f"    * 'GSE', 'SRP', 'SRR', 'PRJNA', 'PRJEB', 'ArrayExpress'\n"
+        f"    * 'cellxgene', 'CZ CELLxGENE', 'CELLxGENE', 'cellxgene.cz'\\n"
+        f"    * GitHub URLs (github.com/...), Zenodo DOIs, Figshare links\\n"
+        f"- For biological discovery papers: be more lenient about code — the data is the primary asset. "
+        f"  If the paper collected data and deposited it to GEO/SRA/cellxgene, score it highly (≥6) even without code.\\n"
+        f"- For computational method papers: require BOTH data accessions AND code repository for high score.\\n"
         f"- **Critical: distinguish Zenodo records by content type**:\n"
         f"    * Put dataset DOIs/URLs in **zenodo_data** (raw .h5ad/.mtx/.rds files, count matrices, supplements)\n"
         f"    * Put software/notebook DOIs/URLs in **zenodo_code** (code archives, Python packages, analysis scripts)\n"
@@ -466,13 +501,17 @@ def llm_rank_articles(candidates: List[Dict[str, Any]], benchmark_type: str) -> 
         f"You are ranking single-cell omics literature candidates for downstream {benchmark_type} analysis. "
         f"Review each item and return a JSON array of objects with keys: \"rank\", \"index\", \"confidence\" (0-100), \"reason\".\n\n"
         f"Ranking rubric:\n"
-        f"- **Tier 1 (rank 1-2)**: Paper explicitly mentions BOTH public dataset accessions (GEO/GSE, SRA, cellxgene, Zenodo) "
-        f"AND a code repository (GitHub, GitLab, Zenodo software). Prefer tier 1 papers where data was collected by authors.\n"
-        f"- **Tier 2 (rank 3-5)**: Paper has clear data accessions OR a code repository but not both explicitly. "
-        f"Or paper has both but from third-party data.\n"
-        f"- **Tier 3 (rank 6+)**: Paper is a review, purely methodological with no data, or unclear about data/code availability.\n\n"
+        f"- **Tier 1 (rank 1-2)**: BIOLOGICAL DISCOVERY paper: paper collected/assembled original single-cell data, "
+        f"performed biological analysis (cell type characterization, tissue mapping, disease mechanism, developmental biology, etc.), "
+        f"AND deposited data to GEO/SRA/cellxgene/Zenodo. Code repository is a bonus but not required.\n"
+        f"- **Tier 2 (rank 3-5)**: Paper has clear data accessions and/or code but is a computational method paper, "
+        f"or a biological discovery paper with data but lacking explicit data accessions.\n"
+        f"- **Tier 3 (rank 6+)**: Paper is a review, purely methodological with no data, unclear about data/code availability, "
+        f"or only reanalyzes public data without new biological insight.\n\n"
         f"Additional guidance:\n"
-        f"- The paper itself does not need to be a benchmark publication; rank it based on reusability of data and code.\n"
+        f"- PRIORITIZE biological discovery papers that generated new data and drew biological conclusions.\n"
+        f"- DEPRIORITIZE pure method papers (new clustering, integration, imputation, normalization methods) "
+        f"even if they provide code and use public data.\n"
         f"- Prefer papers with author-collected, first-hand datasets rather than only secondary reanalysis.\n"
         f"- Data suitability for {benchmark_type} analysis:\n{data_reqs}\n\n"
         f"Candidates:\n{joined_items}\n"
@@ -619,42 +658,53 @@ def llm_generate_queries_adaptive(
 
     if round_idx == 1:
         focus_instruction = (
-            f"Previous search focused on standard single-cell omics keywords. "
-            f"Now use DIFFERENT angles to explore uncovered areas. "
+            f"Previous search focused on general single-cell biology keywords. "
+            f"Now try DIFFERENT biological angles to find discovery papers we missed. "
             f"Avoid repeating the same keyword combinations. "
-            f"Try: specific disease names + single-cell, "
-            f"specific cell types + integration, "
-            f"tissue-specific atlases, "
-            f"spatial transcriptomics + batch correction, "
-            f"multi-modal single-cell studies, "
-            f"or specific technology names (10x, MERFISH, Slide-seq)."
+            f"Try:\n"
+            f"- Specific diseases + single-cell atlas (cancer, Alzheimer's, diabetes, IBD, COVID-19)\n"
+            f"- Specific tissues/organs (lung, brain, heart, liver, kidney, skin, pancreas, gut)\n"
+            f"- Developmental biology (embryogenesis, organogenesis, differentiation trajectories)\n"
+            f"- Aging, regeneration, or immune response at single-cell resolution\n"
+            f"- Cell type discovery or cell state characterization in specific contexts\n"
+            f"- Spatial biology: tissue architecture, microenvironment, cell-cell interactions\n"
+            f"\n"
+            f"IMPORTANT: Target papers that COLLECTED original data and performed BIOLOGICAL "
+            f"analysis. Avoid method/algorithm terms entirely."
         )
     else:  # round_idx >= 2
         focus_instruction = (
-            f"Previous rounds found various papers but may have missed important ones. "
-            f"Try a WIDER scope: use shorter, more general terms. "
-            f"Also try a NARROWER scope: combine VARIED public dataset IDs "
-            f"(like GSE\d+ numbers you know) with single-cell terms. "
-            f"Use DIFFERENT IDs in different queries to explore diverse datasets. "
-            f"Search for well-known single-cell datasets or atlases. "
-            f"Include terms like 'benchmark', 'ground truth', 'curated dataset', "
-            f"'reference atlas', 'cell atlas', 'comprehensive atlas'."
+            f"Previous rounds found various papers but may have missed important biological "
+            f"discovery papers. Try WIDER and NARROWER angles:\n"
+            f"- Wider: use shorter general terms like 'single-cell atlas human tissue' or "
+            f"  'scRNA-seq GSE tissue map'\n"
+            f"- Narrower: combine specific known dataset IDs (GSE\d+) with biological context "
+            f"  terms. Search for well-known single-cell atlases (Tabula Sapiens, Human Cell "
+            f"  Atlas, Tabula Muris, HCA, HTAN, etc.)\n"
+            f"- Try: specific cell types (T cells, neurons, hepatocytes, cardiomyocytes, "
+            f"  epithelial cells) + single-cell atlas + GEO\n"
+            f"- Try: specific technology (10x, Smart-seq2, Drop-seq, MERFISH, Visium) + "
+            f"  biological discovery + GSE\n"
+            f"\n"
+            f"IMPORTANT: Avoid method/algorithm terms. Keep the focus on BIOLOGICAL DISCOVERY "
+            f"papers that collected data and drew biological conclusions."
         )
 
     prompt = (
-        f"You are an expert in discovering single-cell omics datasets for reuse. "
+        f"You are an expert in discovering single-cell omics biological research papers. "
         f"Generate **12** concise search queries — **2 per source** — targeting "
-        f"PubMed, arXiv, Google Scholar, Semantic Scholar, bioRxiv/medRxiv, and Europe PMC. "
+        f"PubMed, arXiv, Semantic Scholar, bioRxiv/medRxiv, and Europe PMC. "
         f"{prev_summary}"
         f"\n\n{focus_instruction}"
-        f"\n\nDATA REQUIREMENTS for integration analysis:\n{data_reqs}"
         f"\n\nRequirements:\n"
         f"- Return ONLY a JSON array of strings, no explanation.\n"
         f"- Each query must be under 200 chars.\n"
-        f"- Focus on papers reporting author-collected, first-hand single-cell or spatial omics data, "
-        f"and that also provide code for reuse.\n"
+        f"- Target BIOLOGICAL DISCOVERY papers: cell atlases, tissue maps, disease "
+        f"  mechanisms, developmental biology, cell type characterization.\n"
+        f"- Papers should have COLLECTED original data and performed BIOLOGICAL analysis.\n"
+        f"- Include terms like 'GEO', 'GSE', 'cellxgene' to find papers with deposited data.\n"
+        f"- Do NOT use method/algorithm keywords (integration, clustering, imputation, etc.).\n"
         f"- Do NOT use source names like 'pubmed', 'arxiv', 'biorxiv' in query text.\n"
-        f"- Include terms like 'GEO', 'GSE', 'SRA', 'cellxgene', 'GitHub', 'Zenodo'.\n"
         f"- Avoid words that trigger review/meta-analysis results.\n"
     )
     if user_query:
@@ -760,13 +810,29 @@ def _recover_almost_accepted(candidates: List[Dict[str, Any]]) -> List[Dict[str,
                     existing_data.add(gse)
                     c.setdefault('gse_ids', []).append(gse)
 
-            new_sra = _re.findall(
-                r'(?:SRP|ERP|SRR|ERR|DRR)\d{4,}', raw_text
-            )
+            # Search for SRA / BioProject accessions
+            new_sra = _re.findall(r'(?:SRP|SRR|PRJNA|PRJEB|ERP|DRP)\d{4,}', raw_text)
             for sra in new_sra:
                 if sra not in existing_data:
                     existing_data.add(sra)
                     c.setdefault('sra_ids', []).append(sra)
+
+            # Search for cellxgene CZ IDs (UUIDs preceded by cellxgene/CZ context)
+            new_cellx = _re.findall(
+                r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                raw_text
+            )
+            for cx in new_cellx:
+                if cx not in existing_data:
+                    existing_data.add(cx)
+                    c.setdefault('cellxgene_ids', []).append(cx)
+
+            # Search for ArrayExpress accessions
+            new_array = _re.findall(r'E-(?:MTAB|GEOD|MEXP|TABM)-\d{4,}', raw_text)
+            for ae in new_array:
+                if ae not in existing_data:
+                    existing_data.add(ae)
+                    c.setdefault('gse_ids', []).append(ae)
 
             # Recompute has_data
             new_has_data = bool(
@@ -799,17 +865,17 @@ def _llm_collect_impl(
     early when *target_accepted* ``FULLY_ACCEPTED`` papers are found.
     """
     from literature.core.search import (
-        search_pubmed, fetch_pubmed_article,
+        search_pubmed_as_source,
         search_arxiv, search_zenodo, search_github,
         search_google_scholar, search_semantic_scholar,
         search_biorxiv, search_figshare, search_europe_pmc,
+        search_springer_nature, fetch_springer_nature_pdf, fetch_springer_nature_fulltext_html,
         fetch_arxiv_article, fetch_semantic_scholar_details,
         fetch_europe_pmc_fulltext, fetch_full_text_by_doi,
         fetch_biorxiv_article,
         timed_search,
     )
     from literature.core.extractor import extract_metadata
-    from literature.core.parser import parse_doi
 
     all_results: List[Dict[str, Any]] = []
     seen_keys: set = set()
@@ -847,21 +913,38 @@ def _llm_collect_impl(
                 f"{benchmark_type} benchmark dataset",
                 f"single-cell {benchmark_type}",
             ]
+        # Pad queries to exactly 12 so all 6 sources get 2 queries each
+        _default_queries = [
+            'single-cell atlas human tissue GEO GSE',
+            'scRNA-seq tissue map cell types deposited GEO',
+            'single-cell RNA-seq human development differentiation GSE',
+            'mouse single-cell atlas cell types GSE',
+            'human disease single-cell RNA-seq atlas GEO',
+            'single-nucleus RNA-seq tissue atlas cell types GSE',
+            'spatial transcriptomics human tissue atlas GEO',
+            'single-cell multi-omics human cell atlas GSE',
+            'development single-cell atlas mouse embryo GEO',
+            'aging single-cell transcriptomics tissue GEO',
+            'immune cell atlas single-cell RNA-seq human GEO',
+            'cancer single-cell atlas tumor microenvironment GSE',
+        ]
+        while len(queries) < 12:
+            queries.append(_default_queries[len(queries) % len(_default_queries)])
 
         candidate_items: List[Dict[str, Any]] = []
         from collections import defaultdict
         source_counts: Dict[str, int] = defaultdict(int)
-        num_sources = 6  # PubMed + 5 external
+        num_sources = 6  # pubmed + biorxiv + europe_pmc + arxiv + springer_nature + semantic_scholar
         per_source_limit = max(3, max_results // num_sources) * config['per_source_mult']
 
         def _dedup_key(item: Dict[str, Any]) -> str:
-            doi = (item.get('doi') or '').strip().lower()
+            doi = str(item.get('doi') or '').strip().lower()
             if doi:
                 return f'doi:{doi}'
-            item_id = (item.get('id') or '').strip()
+            item_id = str(item.get('id') or '').strip()
             if item_id and item.get('source'):
                 return f'{item["source"]}:{item_id}'
-            title = (item.get('title') or '').strip().lower()[:80]
+            title = str(item.get('title') or '').strip().lower()[:80]
             if title:
                 return f'title:{title}'
             return ''
@@ -869,198 +952,182 @@ def _llm_collect_impl(
         def _source_has_capacity(source_name: str) -> bool:
             return source_counts[source_name] < per_source_limit
 
-        # --- PubMed candidates ---
-        for query in queries[:2]:
-            for pmid in search_pubmed(query, max_results=max_results):
-                if pmid in seen_keys or not _source_has_capacity('pubmed'):
-                    continue
-                seen_keys.add(pmid)
-                article = fetch_pubmed_article(pmid)
-                if not article or not article.get('title'):
-                    continue
-                raw_text = f"Title: {article.get('title', '')}\n\nAbstract: {article.get('abstract', '')}"
-                doi = article.get('doi', '')
-                if doi:
-                    try:
-                        doi_text = parse_doi(doi)
-                        if doi_text and not doi_text.startswith('Error fetching'):
-                            is_useful = (
-                                len(doi_text) > 200 and
-                                not doi_text.strip().startswith('<?xml')
-                            )
-                            if is_useful:
-                                raw_text = raw_text + '\n\nDOI_PAGE_CONTENT:\n' + doi_text[:80000]
-                    except Exception:
-                        logger.debug('Failed to fetch DOI page content for %s', doi, exc_info=True)
-                try:
-                    epmc_data = fetch_europe_pmc_fulltext(pmid)
-                    if epmc_data and epmc_data.get('abstract'):
-                        ft = (
-                            f"Title: {epmc_data.get('title', '')}"
-                            f"\n\nAbstract: {epmc_data.get('abstract', '')}"
-                        )
-                        if epmc_data.get('full_text_sections'):
-                            ft += "\n\nFULL_TEXT:\n" + '\n'.join(epmc_data['full_text_sections'])[:20000]
-                        if len(ft) > len(raw_text):
-                            raw_text = ft
-                except Exception:
-                    pass
-                candidate_items.append({
-                    'title': article.get('title', ''),
-                    'summary': article.get('abstract', ''),
-                    'source': 'pubmed',
-                    'id': pmid,
-                    'url': f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/',
-                    'doi': doi,
-                    'raw_text': raw_text,
-                })
-                source_counts['pubmed'] += 1
+        # Helper used in both search enrichment and per-candidate enrichment
+        def _has_enrichment(t: str) -> bool:
+            return 'DOI_PAGE_CONTENT' in t or 'FULL_TEXT' in t
 
-        # Fallback: if PubMed returned nothing
-        if not candidate_items:
-            logger.warning('PubMed returned 0 results with LLM queries; retrying with simple fallback query.')
-            fallback_query = f"{benchmark_type} single-cell RNA-seq GSE"
-            for pmid in search_pubmed(fallback_query, max_results=max_results):
-                if pmid in seen_keys or not _source_has_capacity('pubmed'):
-                    continue
-                seen_keys.add(pmid)
-                article = fetch_pubmed_article(pmid)
-                if not article or not article.get('title'):
-                    continue
-                candidate_items.append({
-                    'title': article.get('title', ''),
-                    'summary': article.get('abstract', ''),
-                    'source': 'pubmed',
-                    'id': pmid,
-                    'url': f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/',
-                    'doi': article.get('doi', ''),
-                    'raw_text': f"Title: {article.get('title', '')}\n\nAbstract: {article.get('abstract', '')}",
-                })
-                source_counts['pubmed'] += 1
+        # ----- Unified source search (PubMed + 5 external) -----
+        _unified_sources = [
+            # Fast sources first — they are less likely to hit slow PDF/DOI enrichment
+            ('semantic_scholar', search_semantic_scholar, min(per_source_limit, 5), (0, 1)),
+            ('springer_nature', search_springer_nature, min(per_source_limit, 5), (2, 3)),
+            ('arxiv', search_arxiv, min(per_source_limit, 5), (4, 5)),
+            ('pubmed', search_pubmed_as_source, min(per_source_limit, 5), (6, 7)),
+            ('biorxiv', search_biorxiv, min(per_source_limit, 5), (8, 9)),
+            ('europe_pmc', search_europe_pmc, min(per_source_limit, 5), (10, 11)),
+        ]
+        # Budget: each source may take up to ~60s for search + inline enrichment
+        _search_deadline = _time_mod.time() + 60 * len(_unified_sources)
 
-        # ----- External sources -----
-        if True:
-            import time as _time
-            _external_queries = queries[2:] if len(queries) > 2 else queries[:2]
-            _active_sources = 5
-            _search_deadline = _time.time() + _SEARCH_TIMEOUT * _active_sources * 2 * 1.5
+        print(f"\n  ── Round {round_idx + 1}: searching {len(_unified_sources)} sources ──")
+        # Per-round total cap: search + ranking + extraction ≤ 600s (10 min)
+        _round_hard_deadline = _time_mod.time() + 600
+        _round_start = _time_mod.time()
 
-            _num_ext_q = len(_external_queries)
-            _external_sources = [
-                ('biorxiv', search_biorxiv, min(per_source_limit, 5),
-                 (0, 1) if _num_ext_q >= 2 else (0,)),
-                ('europe_pmc', search_europe_pmc, min(per_source_limit, 5),
-                 (2, 3) if _num_ext_q >= 4 else (min(2, _num_ext_q-1),)),
-                ('arxiv', search_arxiv, min(per_source_limit, 5),
-                 (4, 5) if _num_ext_q >= 6 else (min(4, _num_ext_q-1),)),
-                ('google_scholar', search_google_scholar, min(per_source_limit, 5),
-                 (6,) if _num_ext_q >= 7 else (min(6, _num_ext_q-1),)),
-                ('semantic_scholar', search_semantic_scholar, min(per_source_limit, 5),
-                 (7, 8, 9) if _num_ext_q >= 10 else (
-                     tuple(range(min(7, _num_ext_q-1), _num_ext_q)) if _num_ext_q > 7 else (min(7, _num_ext_q-1),)
-                 )),
-            ]
-
-            for source_name, search_fn, call_max, q_indices in _external_sources:
-                if _time.time() > _search_deadline:
+        for source_name, search_fn, call_max, q_indices in _unified_sources:
+            if _time_mod.time() > min(_search_deadline, _round_hard_deadline):
+                print(f"  ⏰ Deadline exceeded, stopping search.")
+                break
+            # Per-source deadline: each source gets at most 60s
+            _source_deadline = _time_mod.time() + 60
+            _src_start = _time_mod.time()
+            queries_for_source = [queries[i] for i in q_indices if i < len(queries)]
+            q_short = [q[:60] + '...' if len(q) > 60 else q for q in queries_for_source]
+            print(f"  🔍 [{source_name}] query: {q_short[0] if q_short else 'none'}")
+            _src_items_before = len(candidate_items)
+            for q_idx in q_indices:
+                if _time_mod.time() > min(_search_deadline, _source_deadline):
+                    print(f"    └─ source deadline reached, moving on")
                     break
-                for q_idx in q_indices:
-                    if q_idx >= len(_external_queries):
-                        continue
+                if q_idx >= len(queries):
+                    continue
+                if not _source_has_capacity(source_name):
+                    break
+                query = queries[q_idx]
+                results = timed_search(
+                    search_fn, _search_deadline, query,
+                    max_results=call_max, label=source_name,
+                )
+                for item in results:
                     if not _source_has_capacity(source_name):
                         break
-                    query = _external_queries[q_idx]
-                    results = timed_search(
-                        search_fn, _search_deadline, query,
-                        max_results=call_max, label=source_name,
-                    )
-                    for item in results:
-                        if not _source_has_capacity(source_name):
-                            break
-                        dk = _dedup_key(item)
-                        if dk and dk in seen_keys:
-                            continue
-                        if dk:
-                            seen_keys.add(dk)
+                    dk = _dedup_key(item)
+                    if dk and dk in seen_keys:
+                        continue
+                    if dk:
+                        seen_keys.add(dk)
 
-                        item_raw = item.get('raw_text') or ''
-                        if not item_raw:
-                            item_raw = item.get('summary') or ''
-                        item_doi = item.get('doi', '') or ''
-                        item_id = item.get('id', '') or ''
+                    item_raw = item.get('raw_text') or ''
+                    if not item_raw:
+                        item_raw = item.get('summary') or ''
+                    item_doi = item.get('doi', '') or ''
+                    item_id = item.get('id', '') or ''
 
-                        if source_name in ('europe_pmc', 'biorxiv') and (item_doi or item_id):
+                    if source_name in ('europe_pmc', 'biorxiv') and (item_doi or item_id):
+                        try:
+                            epmc_data = fetch_europe_pmc_fulltext(item_doi or item_id)
+                            if epmc_data and epmc_data.get('abstract'):
+                                enriched = (
+                                    f"Title: {epmc_data.get('title', '')}"
+                                    f"\n\nAbstract: {epmc_data.get('abstract', '')}"
+                                )
+                                if epmc_data.get('full_text_sections'):
+                                    enriched += "\n\nFULL_TEXT:\n" + '\n'.join(epmc_data['full_text_sections'])[:20000]
+                                elif item_doi:
+                                    doi_text = fetch_full_text_by_doi(item_doi)
+                                    if doi_text:
+                                        enriched += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
+                                if len(enriched) > len(item_raw):
+                                    item_raw = enriched
+                        except Exception:
+                            pass
+                        if source_name == 'biorxiv' and item_doi:
                             try:
-                                epmc_data = fetch_europe_pmc_fulltext(item_doi or item_id)
-                                if epmc_data and epmc_data.get('abstract'):
+                                bx_data = fetch_biorxiv_article(item_doi)
+                                if bx_data and bx_data.get('full_text'):
                                     enriched = (
-                                        f"Title: {epmc_data.get('title', '')}"
-                                        f"\n\nAbstract: {epmc_data.get('abstract', '')}"
+                                        f"Title: {bx_data.get('title', '')}"
+                                        f"\n\nAbstract: {bx_data.get('abstract', '')}"
+                                        f"\n\nFULL_TEXT:\n{bx_data['full_text']}"
                                     )
-                                    if epmc_data.get('full_text_sections'):
-                                        enriched += "\n\nFULL_TEXT:\n" + '\n'.join(epmc_data['full_text_sections'])[:20000]
-                                    elif item_doi:
-                                        doi_text = fetch_full_text_by_doi(item_doi)
-                                        if doi_text:
-                                            enriched += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
                                     if len(enriched) > len(item_raw):
                                         item_raw = enriched
                             except Exception:
                                 pass
-                            if source_name == 'biorxiv' and item_doi:
-                                try:
-                                    bx_data = fetch_biorxiv_article(item_doi)
-                                    if bx_data and bx_data.get('full_text'):
-                                        enriched = (
-                                            f"Title: {bx_data.get('title', '')}"
-                                            f"\n\nAbstract: {bx_data.get('abstract', '')}"
-                                            f"\n\nFULL_TEXT:\n{bx_data['full_text']}"
-                                        )
-                                        if len(enriched) > len(item_raw):
-                                            item_raw = enriched
-                                except Exception:
-                                    pass
-                        elif source_name == 'arxiv' and item_id:
-                            try:
-                                arxiv_data = fetch_arxiv_article(item_id)
-                                if arxiv_data and arxiv_data.get('abstract'):
-                                    enriched = f"Title: {arxiv_data.get('title', '')}\n\nAbstract: {arxiv_data.get('abstract', '')}"
-                                    if arxiv_data.get('full_text'):
-                                        enriched += f"\n\nFULL_TEXT:\n{arxiv_data['full_text']}"
-                                    elif item_doi:
-                                        doi_text = fetch_full_text_by_doi(item_doi)
-                                        if doi_text:
-                                            enriched += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
-                                    if len(enriched) > len(item_raw):
-                                        item_raw = enriched
-                            except Exception:
-                                pass
-                        elif source_name in ('semantic_scholar', 'google_scholar') and item_doi:
+                    elif source_name == 'arxiv' and item_id:
+                        try:
+                            arxiv_data = fetch_arxiv_article(item_id)
+                            if arxiv_data and arxiv_data.get('abstract'):
+                                enriched = f"Title: {arxiv_data.get('title', '')}\n\nAbstract: {arxiv_data.get('abstract', '')}"
+                                if arxiv_data.get('full_text'):
+                                    enriched += f"\n\nFULL_TEXT:\n{arxiv_data['full_text']}"
+                                elif item_doi:
+                                    doi_text = fetch_full_text_by_doi(item_doi)
+                                    if doi_text:
+                                        enriched += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
+                                if len(enriched) > len(item_raw):
+                                    item_raw = enriched
+                        except Exception:
+                            pass
+                    elif source_name == 'springer_nature' and item_doi:
+                        # Search phase: use OA API metadata + DOI page only (fast).
+                        # Full PDF download is deferred to the detail extraction phase.
+                        try:
+                            from literature.core.search import fetch_springer_nature_pdf
+                            nat_data = fetch_springer_nature_pdf(item_doi, skip_pdf=True)
+                            if nat_data:
+                                enriched = f"Title: {nat_data.get('title', '')}\n\nAbstract: {nat_data.get('abstract', '')}"
+                                if nat_data.get('full_text'):
+                                    enriched += f"\n\nDOI_PAGE_CONTENT:\n{nat_data['full_text'][:20000]}"
+                                if len(enriched) > len(item_raw):
+                                    item_raw = enriched
+                        except Exception:
+                            pass
+                        # Also try DOI page as a backstop
+                        if not _has_enrichment(item_raw):
                             try:
                                 doi_text = fetch_full_text_by_doi(item_doi)
                                 if doi_text:
-                                    item_raw = item_raw + f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
+                                    item_raw += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:20000]}"
                             except Exception:
                                 pass
+                    elif source_name in ('semantic_scholar', 'google_scholar') and item_doi:
+                        try:
+                            doi_text = fetch_full_text_by_doi(item_doi)
+                            if doi_text:
+                                item_raw = item_raw + f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
+                        except Exception:
+                            pass
+                        try:
+                            epmc_data = fetch_europe_pmc_fulltext(item_doi)
+                            if epmc_data and epmc_data.get('abstract'):
+                                enriched = (
+                                    f"Title: {epmc_data.get('title', '')}"
+                                    f"\n\nAbstract: {epmc_data.get('abstract', '')}"
+                                )
+                                if epmc_data.get('full_text_sections'):
+                                    enriched += "\n\nFULL_TEXT:\n" + '\n'.join(epmc_data['full_text_sections'])[:20000]
+                                if len(enriched) > len(item_raw):
+                                    item_raw = enriched
+                        except Exception:
+                            pass
+                        # Also try Springer Nature PDF for SS papers (search phase: skip_pdf for speed)
+                        if not _has_enrichment(item_raw) and item_doi:
                             try:
-                                epmc_data = fetch_europe_pmc_fulltext(item_doi)
-                                if epmc_data and epmc_data.get('abstract'):
-                                    enriched = (
-                                        f"Title: {epmc_data.get('title', '')}"
-                                        f"\n\nAbstract: {epmc_data.get('abstract', '')}"
+                                nat_data = fetch_springer_nature_pdf(item_doi, skip_pdf=True)
+                                if nat_data and nat_data.get('abstract'):
+                                    item_raw = (
+                                        f"Title: {nat_data.get('title', '')}"
+                                        f"\n\nAbstract: {nat_data.get('abstract', '')}"
                                     )
-                                    if epmc_data.get('full_text_sections'):
-                                        enriched += "\n\nFULL_TEXT:\n" + '\n'.join(epmc_data['full_text_sections'])[:20000]
-                                    if len(enriched) > len(item_raw):
-                                        item_raw = enriched
                             except Exception:
                                 pass
 
-                        item['raw_text'] = item_raw
-                        candidate_items.append(item)
-                        source_counts[source_name] += 1
+                    item['raw_text'] = item_raw
+                    candidate_items.append(item)
+                    source_counts[source_name] += 1
+
+            _src_elapsed = _time_mod.time() - _src_start
+            _src_new = source_counts[source_name]
+            print(f"    └─ {_src_new} candidate(s) in {_src_elapsed:.0f}s")
 
         if not candidate_items:
+            print(f"  ⚠️  Round {round_idx + 1}: no candidates found from any source.")
+            continue
+
+        # Check round hard deadline before expensive ranking + extraction
+        if _time_mod.time() > _round_hard_deadline:
+            print(f"  ⏰ Round hard deadline exceeded, skipping ranking/extraction.")
             continue
 
         # Rank candidates
@@ -1088,9 +1155,6 @@ def _llm_collect_impl(
             candidate_id = candidate.get('id', '') or ''
             doi = candidate.get('doi', '') or ''
 
-            def _has_enrichment(t: str) -> bool:
-                return 'DOI_PAGE_CONTENT' in t or 'FULL_TEXT' in t
-
             # (full-text enrichment per source — same as before)
             if source == 'pubmed':
                 text = candidate.get('raw_text') or text
@@ -1110,6 +1174,14 @@ def _llm_collect_impl(
                                     full += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
                             if len(full) > len(text):
                                 text = full
+                    except Exception:
+                        pass
+                # Unpaywall OA full text (catches papers outside PMC)
+                if not _has_enrichment(text) and doi:
+                    try:
+                        unpaywall_text = fetch_unpaywall_text(doi)
+                        if unpaywall_text:
+                            text += f"\n\nFULL_TEXT:\n{unpaywall_text}"
                     except Exception:
                         pass
             elif source == 'arxiv' and candidate_id:
@@ -1209,6 +1281,70 @@ def _llm_collect_impl(
                                 text = full
                     except Exception:
                         pass
+                # Also try Springer Nature PDF download via proxy for SS papers with DOI
+                if not _has_enrichment(text) and doi:
+                    try:
+                        nat_data = fetch_springer_nature_pdf(doi)
+                        if nat_data and nat_data.get('full_text'):
+                            full = f"Title: {candidate.get('title', '')}\n\nFULL_TEXT:\n{nat_data['full_text']}"
+                            if len(full) > len(text):
+                                text = full
+                    except Exception:
+                        pass
+                # Try Springer Nature HTML full-text (catches Nature journals + BMC/SpringerOpen)
+                if not _has_enrichment(text) and doi:
+                    try:
+                        sn_html = fetch_springer_nature_fulltext_html(doi)
+                        if sn_html and len(sn_html) > 500:
+                            text += f"\n\nFULL_TEXT:\n{sn_html}"
+                    except Exception:
+                        pass
+            elif source == 'springer_nature' and doi:
+                if not _has_enrichment(text):
+                    try:
+                        nat_data = fetch_springer_nature_pdf(doi)
+                        if nat_data and nat_data.get('full_text'):
+                            full = f"Title: {candidate.get('title', '')}\n\nFULL_TEXT:\n{nat_data['full_text']}"
+                            if len(full) > len(text):
+                                text = full
+                    except Exception:
+                        pass
+                # Try Springer Nature dedicated HTML fetch (always try - provides better full text)
+                try:
+                    sn_html = fetch_springer_nature_fulltext_html(doi)
+                    if sn_html and len(sn_html) > 500:
+                        text += f"\n\nFULL_TEXT:\n{sn_html}"
+                except Exception:
+                    pass
+                if not _has_enrichment(text):
+                    try:
+                        doi_text = fetch_full_text_by_doi(doi)
+                        if doi_text:
+                            text += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
+                    except Exception:
+                        pass
+            elif source == 'arxiv' and candidate_id:
+                # arXiv has its own full-text via PDF download
+                if not _has_enrichment(text):
+                    try:
+                        arxiv_data = fetch_arxiv_article(candidate_id)
+                        if arxiv_data:
+                            full = f"Title: {arxiv_data.get('title', '')}\n\nAbstract: {arxiv_data.get('abstract', '')}"
+                            ft = arxiv_data.get('full_text', '')
+                            if ft:
+                                full += f"\n\nFULL_TEXT:\n{ft}"
+                            if len(full) > len(text):
+                                text = full
+                    except Exception:
+                        pass
+                # Also try DOI page if arXiv has a DOI
+                if not _has_enrichment(text) and doi:
+                    try:
+                        doi_text = fetch_full_text_by_doi(doi)
+                        if doi_text:
+                            text += f"\n\nDOI_PAGE_CONTENT:\n{doi_text[:80000]}"
+                    except Exception:
+                        pass
             else:
                 if doi and len(text) < 2000:
                     try:
@@ -1220,6 +1356,62 @@ def _llm_collect_impl(
 
             if not text:
                 continue
+
+            # Quick regex pre-filter: check for obvious GSE/SRA/Zenodo before LLM
+            _raw = text.lower()
+            _has_gse_hint = bool(re.search(r'gse\d{4,}', _raw))
+            _has_sra_hint = bool(re.search(r'(srp|prjna|prjeb|srr|err|drp)\d{4,}', _raw))
+            _has_gh_hint = bool(re.search(r'github\.com/[\w.-]+/[\w.-]+', _raw))
+            _has_zen_hint = bool(re.search(r'zenodo\.\d+|10\.5281/zenodo', _raw))
+            _has_cellx_hint = bool(re.search(r'cellxgene|cz cellxgene', _raw))
+            _has_array_hint = bool(re.search(r'e-(?:mtab|geod|mexp|tabm)-\d{4,}', _raw))
+            _has_any_hint = _has_gse_hint or _has_sra_hint or _has_gh_hint or _has_zen_hint or _has_cellx_hint or _has_array_hint
+
+            # Skip if text is too short (likely a failed fetch — redirect page)
+            if len(text.split()) < 50:
+                continue
+
+            # Check for review/survey keywords (reviews never have original deposited data)
+            _first_3k = _raw[:3000]
+            _is_review = bool(re.search(
+                r'\b(review|survey|perspective|opinion|overview|mini.?review)\b',
+                _first_3k
+            ))
+
+            # Check if this mentions single-cell technology at all
+            _has_sc_mention = bool(re.search(
+                r'single.?cell|sc(?:rna|seq|atac)|sn(?:rna|seq)|single.?nucleus|10x\s*genomics|'
+                r'scrna.?seq|scc|single.?cell.?omics|scmulti.?omics',
+                _first_3k
+            ))
+
+            # Check for technologies that are NOT scRNA-seq (likely irrelevant)
+            _is_wrong_tech = bool(re.search(
+                r'\b(dna methylation|microarray|proteom(?:ics|ic)|mass.?spectrom|western blot|'
+                r'chip.?seq(?!\s*arch)|epigenom|seir\s+model|herd immunity|'
+                r'calcium imaging|confocal)\b',
+                _first_3k
+            ))
+
+            # Skip LLM extraction when clearly irrelevant AND no data hints
+            _is_method = any(kw in _raw[:2000] for kw in [
+                'we propose', 'we introduce', 'our method', 'novel algorithm',
+                'state-of-the-art performance', 'our framework',
+            ])
+
+            if not _has_any_hint:
+                # Method papers with no data → useless
+                if _is_method:
+                    continue
+                # Pure reviews with no data → useless
+                if _is_review:
+                    continue
+                # Wrong technology + no sc mention + no data → irrelevant
+                if _is_wrong_tech and not _has_sc_mention:
+                    continue
+                # No single-cell mention at all AND no data hints → very likely irrelevant
+                if not _has_sc_mention:
+                    continue
 
             llm_data = llm_extract_paper_details(text, benchmark_type)
             if llm_data:
@@ -1323,6 +1515,12 @@ def _llm_collect_impl(
         n_fully = sum(1 for r in all_results if r.get('acceptance') == 'FULLY_ACCEPTED')
         n_data = sum(1 for r in all_results if r.get('acceptance') == 'DATA_ONLY')
         n_code = sum(1 for r in all_results if r.get('acceptance') == 'CODE_ONLY')
+        _round_elapsed = _time_mod.time() - _round_start
+        print(
+            f"  ✅ Round {round_idx + 1} done in {_round_elapsed:.0f}s — "
+            f"{len(all_results)} total: "
+            f"{n_fully} FULLY_ACCEPTED, {n_data} DATA_ONLY, {n_code} CODE_ONLY"
+        )
         logger.info(
             'Round %d complete: %d fully accepted, %d data-only, %d code-only (target=%d)',
             round_idx + 1, n_fully, n_data, n_code, target_accepted,
@@ -1334,6 +1532,18 @@ def _llm_collect_impl(
         0 if r.get('acceptance') == 'FULLY_ACCEPTED' else
         1 if r.get('acceptance') == 'DATA_ONLY' else 2
     ), reverse=False)
+
+    n_fully = sum(1 for r in all_results if r.get('acceptance') == 'FULLY_ACCEPTED')
+    n_data = sum(1 for r in all_results if r.get('acceptance') == 'DATA_ONLY')
+    n_code = sum(1 for r in all_results if r.get('acceptance') == 'CODE_ONLY')
+    n_rejected = sum(1 for r in all_results if r.get('acceptance') == 'REJECTED')
+    print(
+        f"\n  ════════════════════════════════════\n"
+        f"  📊 Literature collection complete!\n"
+        f"     Total: {len(all_results)} candidates\n"
+        f"     {n_fully} FULLY_ACCEPTED · {n_data} DATA_ONLY · {n_code} CODE_ONLY · {n_rejected} REJECTED\n"
+        f"  ════════════════════════════════════\n"
+    )
 
     _audit_call(
         'collect_summary', f'target={target_accepted} rounds={max_rounds}',
