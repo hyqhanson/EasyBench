@@ -62,12 +62,16 @@ def _clean_text(text: str) -> str:
 def search_pubmed(query: str, max_results: int = 5) -> List[str]:
     """Search PubMed and return a list of PMIDs.
 
-    First tries with ``fft[Filter]`` (free full text).  If that returns
-    nothing, retries *without* the fft filter but still excludes reviews.
+    Tries progressively broader searches:
+    1. ``fft[Filter]`` (free full text) + exclusions
+    2. Without fft filter + exclusions
+    3. Minimal filtering — just the raw query with only Review exclusion
+
     Automatically excludes reviews, meta-analyses, editorials.
     """
     # Common exclusion filters
     _exclude = ' NOT (Review[pt] OR Systematic Review[pt] OR Meta-Analysis[pt] OR Editorial[pt] OR Comment[pt])'
+    _light_exclude = ' NOT (Review[pt])'
 
     # --- Attempt 1: with fft[Filter] ---
     try:
@@ -81,7 +85,7 @@ def search_pubmed(query: str, max_results: int = 5) -> List[str]:
         data = response.json()
         ids = data.get('esearchresult', {}).get('idlist', []) or []
         if ids:
-            logger.debug('PubMed fft search returned %d PMIDs for query: %s', len(ids), query[:60])
+            logger.debug('PubMed fft search returned %d PMIDs for: %s', len(ids), query[:60])
             return ids
         logger.debug('PubMed fft search returned 0 for: %s — retrying without fft filter', query[:60])
     except Exception as exc:
@@ -97,10 +101,27 @@ def search_pubmed(query: str, max_results: int = 5) -> List[str]:
         resp2.raise_for_status()
         data2 = resp2.json()
         ids2 = data2.get('esearchresult', {}).get('idlist', []) or []
-        logger.debug('PubMed broad search returned %d PMIDs for: %s', len(ids2), query[:60])
-        return ids2
+        if ids2:
+            logger.debug('PubMed broad search returned %d PMIDs for: %s', len(ids2), query[:60])
+            return ids2
+        logger.debug('PubMed broad search returned 0 for: %s — retrying with light filtering', query[:60])
     except Exception as exc:
         logger.debug('PubMed broad search also failed: %s', exc)
+
+    # --- Attempt 3: minimal filtering, raw query only ---
+    try:
+        url3 = (
+            f"{PUBMED_EUTILS}/esearch.fcgi?db=pubmed&term={quote_plus(query + _light_exclude)}"
+            f"&retmax={max_results * 2}&retmode=json&tool=OmicsClaw&email=omicsclaw@example.com"
+        )
+        resp3 = requests.get(url3, timeout=_SEARCH_TIMEOUT)
+        resp3.raise_for_status()
+        data3 = resp3.json()
+        ids3 = data3.get('esearchresult', {}).get('idlist', []) or []
+        logger.debug('PubMed light-filter search returned %d PMIDs for: %s', len(ids3), query[:60])
+        return ids3
+    except Exception as exc:
+        logger.debug('PubMed light-filter search also failed: %s', exc)
         return []
 
 
@@ -1265,16 +1286,64 @@ def fetch_springer_nature_fulltext_html(doi: str) -> str:
     body_html = re.sub(r'<style[^>]*>.*?</style>', ' ', body_html, flags=re.S | re.I)
     body_html = re.sub(r'<nav[^>]*>.*?</nav>', ' ', body_html, flags=re.S | re.I)
     body_html = re.sub(r'<svg[^>]*>.*?</svg>', ' ', body_html, flags=re.S | re.I)
-    # Strip HTML tags
+
+    # --- Pre-extract critical supplementary sections BEFORE text truncation ---
+    # Nature/Springer puts Data Availability, Code Availability, etc. near the
+    # END of the article body.  The main text is truncated to 80000 chars which
+    # can cut off these crucial sections.  We extract them by HTML section IDs
+    # from body_html before stripping tags.
+    _critical_section_ids = [
+        'data-availability-section',
+        'code-availability-section',
+    ]
+    supp_parts: list = []
+    for section_id in _critical_section_ids:
+        for quote_char in ('"', "'"):
+            id_marker = f'id={quote_char}{section_id}{quote_char}'
+            idx = body_html.find(id_marker)
+            if idx >= 0:
+                # Walk back to the start of the containing HTML tag
+                tag_start = body_html.rfind('<', 0, idx)
+                if tag_start >= 0:
+                    idx = tag_start
+                chunk = body_html[idx:idx + 6000]
+                chunk = re.sub(r'<script[^>]*>.*?</script>', ' ', chunk, flags=re.S | re.I)
+                chunk = re.sub(r'<style[^>]*>.*?</style>', ' ', chunk, flags=re.S | re.I)
+                chunk = re.sub(r'<nav[^>]*>.*?</nav>', ' ', chunk, flags=re.S | re.I)
+                chunk = re.sub(r'<svg[^>]*>.*?</svg>', ' ', chunk, flags=re.S | re.I)
+                chunk = re.sub(r'<[^>]+>', ' ', chunk)
+                # Clean any remaining HTML attribute fragments
+                chunk = re.sub(r'\b(?:id|class|data-[a-z-]+|aria-[a-z-]+)\s*=\s*"[^"]*"', ' ', chunk)
+                chunk = re.sub(r'\s+', ' ', chunk).strip()
+                if len(chunk) > 30:
+                    section_title = section_id.replace('-section', '').replace('-', ' ').title()
+                    supp_parts.append(f"{section_title}: {chunk}")
+                break
+
+    # Strip HTML tags for the main body
     text = re.sub(r'<[^>]+>', ' ', body_html)
     text = re.sub(r'\s+', ' ', text).strip()
+
     # Skip past the first Abstract to avoid CSS/layout noise
     abstract_idx = text.lower().find('abstract')
-    if abstract_idx > 100:  # if Abstract is far from start, there's noise before it
+    if abstract_idx > 100:
         text = text[abstract_idx:]
+
+    # Truncate main body to limit token usage
+    if len(text) > 500:
+        text = text[:80000]
+
+    # Append pre-extracted sections so critical data/code info is never lost
+    if supp_parts:
+        supp_text = '\n\n'.join(supp_parts)
+        text += f"\n\nSUPPLEMENTARY_SECTIONS:\n{supp_text}"
+        logger.debug('Appended %d supp section(s) for %s (%d chars)',
+                     len(supp_parts), doi, len(supp_text))
+
     if len(text) > 500:
         logger.debug('Springer Nature HTML body extracted for %s (%d chars)', doi, len(text))
-        return text[:80000]
+        # Allow extra space for supplementary sections (up to 100 000 chars total)
+        return text[:100000]
 
     # Last resort: clean whole page
     html_clean = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.S | re.I)

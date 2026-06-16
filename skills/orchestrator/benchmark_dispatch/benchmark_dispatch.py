@@ -11,9 +11,10 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 # Add parent directories to path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -26,6 +27,7 @@ from literature.core.extractor import extract_metadata
 from literature.core.search import fetch_pubmed_article, search_pubmed
 from literature.core.downloader import (
     download_cellxgene_dataset,
+    download_from_zenodo,
     download_geo_dataset,
     download_sra_dataset,
 )
@@ -54,6 +56,10 @@ def main():
                        help='Git clone depth for reproduction checkout')
     parser.add_argument('--use-llm', action='store_true',
                        help='Use LLM for intelligent literature search and dataset extraction')
+    parser.add_argument('--benchmark-data-dir',
+                       default=str(Path(__file__).resolve().parent.parent.parent.parent / 'benchmark_data'),
+                       help='Root directory for per-paper downloaded benchmark data '
+                            '(default: OmicsClaw/benchmark_data/)')
 
     args = parser.parse_args()
 
@@ -71,17 +77,20 @@ def main():
                                           args.input, output_dir, args.no_download,
                                           use_llm=args.use_llm)
     
-    # Step 2.5: Download candidate datasets for collected accessions
+    # Step 2.5: Save FULLY_ACCEPTED papers to per-benchmark, per-paper folder structure
+    benchmark_data_dir = Path(args.benchmark_data_dir)
+    accepted_summary = save_accepted_papers(
+        collected_data,
+        benchmark_data_dir,
+        args.benchmark_type,
+        download_data=not args.no_download,
+    )
+    collected_data['accepted_papers_summary'] = accepted_summary
+
+    # Step 2.6: Re-discover data for papers whose initial downloads are insufficient
     if not args.no_download:
-        print("\n📦 Downloading candidate datasets...")
-        collected_data['download_results'] = download_collected_datasets(
-            collected_data, output_dir / 'downloaded_data'
-        )
-        collected_data['downloaded_datasets'] = {
-            'geo': [res['gse_id'] for res in collected_data['download_results'] if res.get('source') == 'geo'],
-            'sra': [res['sra_id'] for res in collected_data['download_results'] if res.get('source') == 'sra'],
-            'cellxgene': [res['cellxgene_id'] for res in collected_data['download_results'] if res.get('source') == 'cellxgene'],
-        }
+        rediscovery_result = rediscover_paper_data_if_needed(benchmark_data_dir, args.benchmark_type)
+        collected_data['rediscovery'] = rediscovery_result
 
     if not args.no_reproduce:
         print("\n🔧 Running reproduce-paper workflow...")
@@ -262,14 +271,33 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
     # Aggregate datasets
     for result in collected_data['literature_results']:
         metadata = result.get('metadata', {})
+        # LLM collector outputs top-level keys (gse_ids, sra_ids, cellxgene_ids)
+        # Hardcoded/pubmed results use nested metadata.geo_accessions.gse format
+        llm_gse = result.get('gse_ids', [])
+        llm_sra = result.get('sra_ids', [])
+        llm_cellx = result.get('cellxgene_ids', [])
+        llm_github = result.get('github_repos', [])
         # GEO / SRA / cellxgene
-        collected_data['datasets']['geo'].extend(metadata.get('geo_accessions', {}).get('gse', []) or metadata.get('geo_accessions', {}).get('gse', []))
-        collected_data['datasets']['sra'].extend(metadata.get('sra_accessions', []) or metadata.get('sra_accessions', []))
-        collected_data['datasets']['cellxgene'].extend(metadata.get('cellxgene_accessions', []) or metadata.get('cellxgene_accessions', []))
+        collected_data['datasets']['geo'].extend(
+            metadata.get('geo_accessions', {}).get('gse', []) or llm_gse
+        )
+        collected_data['datasets']['sra'].extend(
+            metadata.get('sra_accessions', []) or llm_sra
+        )
+        collected_data['datasets']['cellxgene'].extend(
+            metadata.get('cellxgene_accessions', []) or llm_cellx
+        )
         # New sources
-        collected_data['datasets']['arxiv'].extend(metadata.get('arxiv_ids', []) or metadata.get('arxiv_ids', []))
-        collected_data['datasets']['github'].extend(metadata.get('github_repos', []) or metadata.get('github_repos', []))
-        collected_data['datasets']['zenodo'].extend(metadata.get('zenodo_records', []) or metadata.get('zenodo_records', []))
+        collected_data['datasets']['arxiv'].extend(
+            metadata.get('arxiv_ids', []) or result.get('arxiv_ids', [])
+        )
+        collected_data['datasets']['github'].extend(
+            metadata.get('github_repos', []) or llm_github
+        )
+        collected_data['datasets']['zenodo'].extend(
+            metadata.get('zenodo_records', []) or
+            (result.get('zenodo_data', []) + result.get('zenodo_code', []))
+        )
     
     # Remove duplicates
     for key in collected_data['datasets']:
@@ -280,9 +308,14 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
     collected_data['literature_results'] = [
         r for r in collected_data['literature_results']
         if (
+            # Old format: nested under metadata.geo_accessions.gse
             r.get('metadata', {}).get('geo_accessions', {}).get('gse', [])
             or r.get('metadata', {}).get('sra_accessions', [])
             or r.get('metadata', {}).get('cellxgene_accessions', [])
+            # LLM collector format: top-level keys
+            or r.get('gse_ids', [])
+            or r.get('sra_ids', [])
+            or r.get('cellxgene_ids', [])
         )
     ]
     after = len(collected_data['literature_results'])
@@ -353,7 +386,12 @@ def process_literature_input(input_text: str, benchmark_type: str,
 
 
 def download_collected_datasets(collected_data: Dict, output_dir: Path) -> List[Dict]:
-    """Download candidate datasets for the collected accession IDs."""
+    """Download candidate datasets for the collected accession IDs.
+
+    .. deprecated::
+       Use ``save_accepted_papers()`` instead — it organises downloads
+       per paper under ``benchmark_data/{benchmark_type}/{paper_slug}/data/``.
+    """
     download_results = []
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -514,18 +552,398 @@ def generate_workflow_plan(benchmark_type: str, collected_data: Dict) -> Dict:
     elif benchmark_type == 'clustering':
         plan['required_skills'].extend(['sc-preprocessing', 'clustering'])
     
-    downloaded = collected_data.get('downloaded_datasets', {})
+    downloaded = collected_data.get('accepted_papers_summary', {})
     plan['data_requirements'] = {
         'datasets_found': sum(len(v) for v in datasets.values()),
         'geo_datasets': len(datasets.get('geo', [])),
         'sra_datasets': len(datasets.get('sra', [])),
         'cellxgene_datasets': len(datasets.get('cellxgene', [])),
-        'downloaded_geo': len(downloaded.get('geo', [])),
-        'downloaded_sra': len(downloaded.get('sra', [])),
-        'downloaded_cellxgene': len(downloaded.get('cellxgene', [])),
+        'accepted_papers_saved': downloaded.get('saved_count', 0),
     }
     
     return plan
+
+
+def _sanitize_folder_name(name: str, max_len: int = 60) -> str:
+    """Convert a paper title or identifier into a safe folder name."""
+    # Remove or replace unsafe characters
+    safe = re.sub(r'[<>:"/\\|?*]', '', name)
+    # Replace whitespace and common separators with hyphens
+    safe = re.sub(r'[\s,;:!]+', '-', safe)
+    # Collapse multiple hyphens
+    safe = re.sub(r'-{2,}', '-', safe)
+    # Strip leading/trailing hyphens and dots
+    safe = safe.strip('-.').lower()
+    # Truncate
+    if len(safe) > max_len:
+        # Try to cut at a hyphen boundary
+        cutoff = safe.rfind('-', 0, max_len)
+        if cutoff > max_len // 2:
+            safe = safe[:cutoff]
+        else:
+            safe = safe[:max_len]
+    return safe or 'paper'
+
+
+def save_accepted_papers(
+    collected_data: Dict[str, Any],
+    root_dir: Path,
+    benchmark_type: str,
+    download_data: bool = True,
+) -> Dict[str, Any]:
+    """Save FULLY_ACCEPTED papers to a per-benchmark, per-paper folder hierarchy.
+
+    Creates::
+
+        {root_dir}/
+          {benchmark_type}/
+            {paper_slug}/
+              paper_metadata.json
+              data/
+                {gse_id}/
+                {sra_id}/
+                ...
+    """
+    literature_results = collected_data.get('literature_results', [])
+    accepted = [r for r in literature_results if r.get('acceptance') == 'FULLY_ACCEPTED']
+
+    if not accepted:
+        print('  ⚠️  No FULLY_ACCEPTED papers to save.')
+        return {'saved': 0, 'benchmark_type': benchmark_type, 'papers': []}
+
+    bench_dir = root_dir / benchmark_type
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f'\n  📁 Saving {len(accepted)} FULLY_ACCEPTED paper(s) to: {bench_dir}')
+
+    summary: Dict[str, Any] = {
+        'benchmark_type': benchmark_type,
+        'saved_count': 0,
+        'papers': [],
+    }
+
+    for idx, paper in enumerate(accepted):
+        title = paper.get('title', '')
+        doi = paper.get('doi', '')
+        doi_suffix = doi.rsplit('/', 1)[-1] if doi and '/' in doi else ''
+
+        # Build a human-readable folder slug from title + DOI
+        if title:
+            # Take first 8 meaningful words
+            words = [w for w in title.lower().split() if len(w) > 2][:8]
+            slug = _sanitize_folder_name('-'.join(words), max_len=60)
+        else:
+            slug = doi_suffix or f'paper_{idx + 1}'
+        if doi_suffix and doi_suffix not in slug:
+            slug = f'{slug}-{_sanitize_folder_name(doi_suffix, max_len=20)}'
+
+        paper_dir = bench_dir / slug
+        # Handle duplicate slugs
+        if paper_dir.exists():
+            paper_dir = bench_dir / f'{slug}-{idx}'
+        paper_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Build paper_metadata.json ──
+        metadata = {
+            'title': title,
+            'doi': doi,
+            'acceptance': paper.get('acceptance'),
+            'source': paper.get('source'),
+            'gse_ids': paper.get('gse_ids', []),
+            'sra_ids': paper.get('sra_ids', []),
+            'cellxgene_ids': paper.get('cellxgene_ids', []),
+            'github_repos': paper.get('github_repos', []),
+            'zenodo_data': paper.get('zenodo_data', []),
+            'zenodo_code': paper.get('zenodo_code', []),
+            'figshare_links': paper.get('figshare_links', []),
+            'organism': paper.get('organism', ''),
+            'tissue': paper.get('tissue', ''),
+            'technology': paper.get('technology', ''),
+            'relevance_score': paper.get('relevance_score', 0),
+            'methods_summary': paper.get('methods_summary', ''),
+            'reason': paper.get('reason', ''),
+            'benchmark_type': benchmark_type,
+            'saved_at': None,  # filled after download
+        }
+
+        # ── Download data for this paper ──
+        data_dir = paper_dir / 'data'
+        data_dir.mkdir(exist_ok=True)
+
+        download_results: List[Dict[str, Any]] = []
+
+        # Filter out INFERRED_DATA placeholders
+        gse_ids = [g for g in paper.get('gse_ids', []) if g and g != 'INFERRED_DATA']
+        sra_ids = paper.get('sra_ids', []) or []
+        cellxgene_ids = paper.get('cellxgene_ids', []) or []
+
+        if download_data:
+
+            for gse_id in gse_ids:
+                print(f'    📥 [{slug}] Downloading GEO: {gse_id}')
+                try:
+                    result = download_geo_dataset(gse_id, data_dir / gse_id)
+                    download_results.append(result)
+                    metadata.setdefault('downloaded_data', []).append({
+                        'type': 'geo',
+                        'id': gse_id,
+                        'status': result.get('status'),
+                        'path': str(data_dir / gse_id),
+                    })
+                except Exception as exc:
+                    print(f'    ⚠️  Failed to download GEO {gse_id}: {exc}')
+
+            for sra_id in sra_ids:
+                print(f'    📥 [{slug}] Downloading SRA: {sra_id}')
+                try:
+                    result = download_sra_dataset(sra_id, data_dir / sra_id)
+                    download_results.append(result)
+                    metadata.setdefault('downloaded_data', []).append({
+                        'type': 'sra',
+                        'id': sra_id,
+                        'status': result.get('status'),
+                        'path': str(data_dir / sra_id),
+                    })
+                except Exception as exc:
+                    print(f'    ⚠️  Failed to download SRA {sra_id}: {exc}')
+
+            # Zenodo data (processed data)
+            zenodo_links = paper.get('zenodo_data', []) or []
+            for zenodo_url in zenodo_links:
+                print(f'    📥 [{slug}] Downloading Zenodo data: {zenodo_url}')
+                try:
+                    result = download_from_zenodo(zenodo_url, data_dir / f'zenodo_{_sanitize_folder_name(zenodo_url[-20:], max_len=30)}')
+                    download_results.append(result)
+                    metadata.setdefault('downloaded_data', []).append({
+                        'type': 'zenodo_data',
+                        'id': zenodo_url,
+                        'status': result.get('status'),
+                        'path': str(data_dir),
+                    })
+                except Exception as exc:
+                    print(f'    ⚠️  Failed to download Zenodo data {zenodo_url}: {exc}')
+
+            # Zenodo code (GitHub snapshots — useful for re-discovery)
+            zenodo_code_links = paper.get('zenodo_code', []) or []
+            for zenodo_url in zenodo_code_links:
+                print(f'    📥 [{slug}] Downloading Zenodo code: {zenodo_url}')
+                try:
+                    result = download_from_zenodo(zenodo_url, data_dir / f'zenodo_{_sanitize_folder_name(zenodo_url[-20:], max_len=30)}')
+                    download_results.append(result)
+                    metadata.setdefault('downloaded_data', []).append({
+                        'type': 'zenodo_code',
+                        'id': zenodo_url,
+                        'status': result.get('status'),
+                        'path': str(data_dir),
+                    })
+                except Exception as exc:
+                    print(f'    ⚠️  Failed to download Zenodo code {zenodo_url}: {exc}')
+
+            for cx_id in cellxgene_ids:
+                print(f'    📥 [{slug}] Downloading cellxgene: {cx_id}')
+                try:
+                    result = download_cellxgene_dataset(cx_id, data_dir / cx_id.replace('/', '_'))
+                    download_results.append(result)
+                    metadata.setdefault('downloaded_data', []).append({
+                        'type': 'cellxgene',
+                        'id': cx_id,
+                        'status': result.get('status'),
+                        'path': str(data_dir / cx_id.replace('/', '_')),
+                    })
+                except Exception as exc:
+                    print(f'    ⚠️  Failed to download cellxgene {cx_id}: {exc}')
+
+        # ── Fill timestamp and write metadata ──
+        from datetime import datetime, timezone
+        metadata['saved_at'] = datetime.now(timezone.utc).isoformat()
+
+        meta_path = paper_dir / 'paper_metadata.json'
+        meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding='utf-8')
+
+        paper_info = {
+            'slug': slug,
+            'title': title[:120],
+            'path': str(paper_dir),
+            'metadata_file': str(meta_path),
+            'gse_ids': gse_ids,
+            'sra_ids': sra_ids,
+            'cellxgene_ids': cellxgene_ids,
+            'github_repos': paper.get('github_repos', []),
+            'downloads': [dr.get('status') for dr in download_results],
+        }
+        summary['papers'].append(paper_info)
+        print(f'    ✅ [{slug}]: metadata + {len(download_results)} download(s)')
+
+    summary['saved_count'] = len(summary['papers'])
+
+    # Write overall summary for this benchmark type
+    summary_path = bench_dir / '_summary.json'
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding='utf-8')
+    print(f'  📊 Summary saved to: {summary_path}')
+
+    return summary
+
+
+def rediscover_paper_data_if_needed(benchmark_data_dir: Path, benchmark_type: str) -> Dict[str, Any]:
+    """After initial downloads, check if any FULLY_ACCEPTED paper lacks sc-data.
+
+    For papers whose downloaded files contain no actual single-cell data
+    (e.g. only PDFs, metadata JSON), this function scans the paper's
+    GitHub repository for data links (Zenodo records, GEO IDs, download
+    URLs in README/DATA.md) and attempts to download the real data.
+
+    This implements the "agent-driven data re-discovery" pattern: if the
+    links extracted by the LLM don't provide usable data, the system
+    autonomously searches the paper's own code repository for clues.
+    """
+    bench_dir = benchmark_data_dir / benchmark_type
+    if not bench_dir.exists():
+        return {'rediscovered': 0, 'papers': []}
+
+    import zipfile as _zipfile
+
+    # File extensions that indicate actual single-cell data
+    _DATA_EXTENSIONS = {'.h5ad', '.h5', '.mtx', '.loom', '.rds', '.h5seurat'}
+
+    def _zip_contains_data(zip_path: Path) -> bool:
+        """Quick check: does a zip file contain sc-data files (not just code)?"""
+        try:
+            with _zipfile.ZipFile(zip_path) as zf:
+                sample = zf.namelist()[:200]  # Check first 200 files
+                data_count = sum(1 for n in sample
+                               if Path(n).suffix.lower() in _DATA_EXTENSIONS)
+                # If > 5% of sampled files are data files, it's a data zip
+                return data_count > max(1, len(sample) * 0.05)
+        except Exception:
+            return False  # Can't read, assume not data
+
+    results = []
+    for paper_dir in sorted(bench_dir.iterdir()):
+        if not paper_dir.is_dir():
+            continue
+
+        meta_path = paper_dir / 'paper_metadata.json'
+        if not meta_path.exists():
+            continue
+
+        metadata = json.loads(meta_path.read_text(encoding='utf-8'))
+        data_dir = paper_dir / 'data'
+        if not data_dir.exists():
+            continue
+
+        # ── Check if paper already has real sc-data files ──
+        has_data = False
+        all_files = list(data_dir.rglob('*'))
+        for f in all_files:
+            if not f.is_file():
+                continue
+            if f.stat().st_size < 1024:
+                continue
+            # Direct sc-data files
+            if f.suffix.lower() in _DATA_EXTENSIONS:
+                has_data = True
+                break
+            # Zip files: only count as data if they contain sc-data inside
+            if f.suffix.lower() == '.zip' and f.stat().st_size > 10 * 1024 * 1024:
+                if _zip_contains_data(f):
+                    has_data = True
+                    break
+
+        if has_data:
+            continue  # Already has data, skip
+
+        print(f'\n  🔍 [{paper_dir.name}] No sc-data found — re-discovering...')
+
+        new_downloads = []
+
+        # ── Strategy 1: Scan downloaded GitHub repo zips ──
+        for f in all_files:
+            if not f.is_file():
+                continue
+            if f.suffix.lower() != '.zip':
+                continue
+            if f.stat().st_size < 1024:
+                continue
+
+            new_urls = _extract_data_urls_from_zip(f)
+            if new_urls:
+                print(f'    Found {len(new_urls)} data URL(s) in {f.name}')
+
+                # Try Zenodo records first
+                zenodo_ids = set()
+                for url in new_urls:
+                    m = re.search(r'zenodo[./]records?/(\d+)', url)
+                    if m:
+                        zenodo_ids.add(m.group(1))
+                    m = re.search(r'zenodo[./](\d{8})', url)
+                    if m:
+                        zenodo_ids.add(m.group(1))
+
+                for zid in sorted(zenodo_ids):
+                    print(f'    📥 Re-discovered Zenodo: {zid}')
+                    try:
+                        result = download_from_zenodo(zid, data_dir / f'zenodo_{zid}')
+                        new_downloads.append({
+                            'type': 'zenodo_rediscovered',
+                            'id': zid,
+                            'status': result.get('status'),
+                            'path': str(data_dir / f'zenodo_{zid}'),
+                        })
+                    except Exception as exc:
+                        print(f'    ⚠️  Failed: {exc}')
+
+        # ── Strategy 2: Check paper's methods_summary / reason for hints ──
+        # (Future: use LLM to extract implicit data links from text)
+
+        # ── Update metadata ──
+        if new_downloads:
+            existing = metadata.get('downloaded_data', [])
+            existing.extend(new_downloads)
+            metadata['downloaded_data'] = existing
+            metadata['_rediscovered_at'] = __import__('datetime').datetime.now(
+                __import__('datetime').timezone.utc
+            ).isoformat()
+            meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding='utf-8')
+            print(f'    ✅ Added {len(new_downloads)} re-discovered download(s)')
+
+        results.append({
+            'paper': paper_dir.name,
+            'rediscovered': len(new_downloads),
+        })
+
+    total = sum(r['rediscovered'] for r in results)
+    if total:
+        print(f'\n  🔄 Data re-discovery complete: {total} new download(s) across {len(results)} paper(s)')
+    return {'rediscovered': total, 'papers': results}
+
+
+def _extract_data_urls_from_zip(zip_path: Path) -> List[str]:
+    """Scan a GitHub repo zip for data download URLs in README/DATA files."""
+    import zipfile as _zipfile
+    urls = []
+    try:
+        with _zipfile.ZipFile(zip_path) as zf:
+            # Look for README, DATA.md, and Python scripts in priority order
+            candidates = [n for n in zf.namelist()
+                         if any(k in n.lower() for k in ['readme', 'data.md', 'download', 'setup'])]
+            for name in candidates[:5]:
+                try:
+                    text = zf.read(name).decode('utf-8', errors='replace')
+                except Exception:
+                    continue
+                # Extract URLs
+                found = re.findall(r'https?://[^\s\)\]\"\>]+', text)
+                for u in found:
+                    if any(k in u.lower() for k in [
+                        'zenodo.org/record', 'zenodo.org/api',
+                        'doi.org/10.5281/zenodo',
+                        'figshare.com', 'ncbi.nlm.nih.gov/geo',
+                        'cellxgene.cziscience.com',
+                    ]):
+                        urls.append(u.rstrip('.,;:'))
+    except Exception as e:
+        print(f'    ⚠️  Error reading zip {zip_path.name}: {e}')
+    return list(set(urls))  # deduplicate
 
 
 def save_results(workflow_plan: Dict, collected_data: Dict, output_dir: Path):
@@ -554,9 +972,7 @@ def save_results(workflow_plan: Dict, collected_data: Dict, output_dir: Path):
   - {', '.join(collected_data['datasets']['cellxgene'])}
 
 ## Downloaded Candidate Data
-- **GEO downloaded**: {len(collected_data.get('downloaded_datasets', {}).get('geo', []))}
-- **SRA downloaded**: {len(collected_data.get('downloaded_datasets', {}).get('sra', []))}
-- **cellxgene downloaded**: {len(collected_data.get('downloaded_datasets', {}).get('cellxgene', []))}
+- **Accepted papers saved**: {collected_data.get('accepted_papers_summary', {}).get('saved_count', 0)}
 
 ## Workflow Plan
 """

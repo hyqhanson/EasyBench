@@ -21,6 +21,8 @@ import os
 import re
 import sys
 import time as _time_mod
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +32,15 @@ logger = logging.getLogger(__name__)
 
 # Timeout for external HTTP requests (connect + read).
 _SEARCH_TIMEOUT = 15  # seconds
+
+# ---------------------------------------------------------------------------
+# Model routing: Flash for high-volume structured tasks, Pro for judgment
+# ---------------------------------------------------------------------------
+# OmicsClaw provider config maps:
+#   "deepseek-v4-flash" → deepseek-v4-flash API model
+#   "deepseek-v4-pro"   → deepseek-v4-pro   API model
+_MODEL_FLASH = "deepseek-v4-flash"
+_MODEL_PRO = "deepseek-v4-pro"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -85,8 +96,17 @@ def _audit_record_parsed(parsed: Any) -> None:
 
 
 def _call_llm(directive: str, system_prompt: str, temperature: float = 0.3,
-              call_type: str = 'unknown', max_tokens: int = 4096) -> Optional[str]:
-    """Try to call the OmicsClaw LLM. Returns None if unavailable."""
+              call_type: str = 'unknown', max_tokens: int = 4096,
+              llm_model: str = '') -> Optional[str]:
+    """Try to call the OmicsClaw LLM. Returns None if unavailable.
+
+    Parameters
+    ----------
+    llm_model:
+        Explicit model name override (e.g. ``"deepseek-v4-flash"`` or
+        ``"deepseek-v4-pro"``). When empty, the default provider model
+        is used.
+    """
     t0 = _time_mod.time()
     try:
         from omicsclaw.autoagent.llm_client import call_llm
@@ -96,6 +116,7 @@ def _call_llm(directive: str, system_prompt: str, temperature: float = 0.3,
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
+            llm_model=llm_model,
         )
         if not result or not str(result).strip():
             _audit_call(call_type, directive, system_prompt, result, None,
@@ -139,6 +160,8 @@ def _extract_json_fragment(raw: str) -> Optional[str]:
 
 
 def _repair_truncated_json(fragment: str) -> str:
+    """Repair truncated/incomplete JSON by closing brackets and stripping
+    trailing incomplete key-value pairs (e.g. ``"key": `` with no value)."""
     repaired_chars: List[str] = []
     stack: List[str] = []
     in_string = False
@@ -186,10 +209,68 @@ def _repair_truncated_json(fragment: str) -> str:
 
     result = ''.join(repaired_chars)
     # Also strip any trailing comma that ended up right before a closing bracket
-    # (e.g. from the original fragment itself: `"first_hand_data": false,}`)
     result = re.sub(r',\s*}', '}', result)
     result = re.sub(r',\s*]', ']', result)
+
+    # --- Strip trailing incomplete key-value pair ---
+    # When LLM output is truncated mid-stream, the last element may be
+    # incomplete: ``"key": `` (no value), ``"key": 1`` (partial number),
+    # or ``"key": "incomplete string`` (unclosed, already handled above).
+    # Strategy: find the last ``"key":`` that lacks a complete value
+    # and strip everything from that colon forward, then re-close.
+    result = _strip_trailing_incomplete(result)
     return result
+
+
+def _strip_trailing_incomplete(text: str) -> str:
+    """Remove the last incomplete key-value pair from repaired JSON.
+
+    Example: ``[{"a":1},{"b":}]`` → ``[{"a":1}]``
+             ``[{"a":1},{"b":  ``  → ``[{"a":1}]`` (closing brackets already added)
+    """
+    # Strategy: find the last ``:`` not inside a string and check if
+    # there's a complete value after it (before the closing bracket).
+    # If not, strip back to the preceding ``,``.
+    #
+    # We search for the pattern: ``:`` followed by optional whitespace
+    # then immediately a ``,``, ``}`` or ``]`` (i.e. no value).
+    # Also handles partial values like ``: 95`` at the very end when
+    # the value might be incomplete (we conservatively strip it).
+    improved = re.sub(
+        r',\s*"[^"]*"\s*:\s*(?=[,}\]])', '',
+        text,
+    )
+    if improved != text:
+        # Re-close brackets after stripping (inline to avoid recursion)
+        open_count = improved.count('{') + improved.count('[')
+        close_count = improved.count('}') + improved.count(']')
+        missing = open_count - close_count
+        if missing > 0:
+            stack2: List[str] = []
+            in_str2 = False
+            esc2 = False
+            for ch in improved:
+                if esc2:
+                    esc2 = False; continue
+                if ch == '\\':
+                    esc2 = True; continue
+                if ch == '"':
+                    in_str2 = not in_str2; continue
+                if in_str2:
+                    continue
+                if ch == '{':
+                    stack2.append('}')
+                elif ch == '[':
+                    stack2.append(']')
+                elif ch in ('}', ']'):
+                    if stack2 and ch == stack2[-1]:
+                        stack2.pop()
+            while stack2:
+                if improved and improved[-1] == ',':
+                    improved = improved[:-1]
+                improved += stack2.pop()
+        return improved
+    return text
 
 
 def _parse_llm_json(raw: str) -> Optional[Any]:
@@ -351,11 +432,19 @@ def llm_generate_queries(benchmark_type: str, user_query: Optional[str] = None) 
         f"   developmental biology, disease mechanism, biomarker discovery, aging, etc.\n"
         f"3. Deposited data to GEO/SRA/cellxgene/Zenodo\n"
         f"\n"
-        f"DO NOT focus on:\n"
-        f"- Pure method/algorithm papers (new clustering, integration, imputation methods)\n"
+        f"DO NOT focus on — exclude these from ALL queries:\n"
+        f"- Pure method/algorithm papers (new tools, packages, pipelines, algorithms)\n"
+        f"  These typically have titles like: \"Tool: ...\", \"Package: ...\", "
+        f"\"...: a method for ...\", \"... enables ... analysis\"\n"
         f"- Benchmark papers comparing methods\n"
-        f"- Review papers or meta-analyses\n"
-        f"- Papers that only reanalyze existing public data without generating new biological insight\n"
+        f"- Review papers, surveys, meta-analyses\n"
+        f"- Papers that only reanalyze existing public data without new biological insight\n"
+        f"- Papers about software/tool development (even if they process scRNA-seq data)\n"
+        f"\n"
+        f"INSTEAD, target papers with titles like:\n"
+        f"  \"A single-cell atlas of ...\", \"Single-cell transcriptomics reveals ...\", "
+        f"\"Cell-type mapping of ...\"\n"
+        f"These are BIOLOGICAL DISCOVERY papers — they generate new data and biological insights.\n"
         f"\n"
         f"NOTE: GitHub and Zenodo code are helpful signals but not the primary target — "
         f"we want the BIOLOGICAL DISCOVERY paper itself.\n\n"
@@ -368,16 +457,19 @@ def llm_generate_queries(benchmark_type: str, user_query: Optional[str] = None) 
         f"- Include terms like \"single-cell\", \"scRNA-seq\", \"snRNA-seq\", \"spatial transcriptomics\", "
         f"  \"GEO\", \"GSE\", \"cellxgene\" to ensure papers with deposited data.\n"
         f"- Include \"human\" or \"mouse\" or specific tissues/organs to target biological studies.\n"
-        f"- Do NOT include method/algorithm keywords (\"integration\", \"batch correction\", "
+        f"- For PubMed/Europe PMC queries, ALWAYS include \"GEO\" or \"GSE\" to find deposited data.\n"
+        f"- 🔴 CRITICAL: Do NOT use method/algorithm keywords (\"tool\", \"package\", \"pipeline\", "
+        f"  \"software\", \"method\", \"algorithm\", \"framework\", \"integration\", \"batch correction\", "
         f"  \"clustering\", \"imputation\", \"normalization\", \"embedding\", \"representation learning\").\n"
-        f"- AVOID terms that attract review papers (\"survey\", \"review\", \"overview\", \"systematic\").\n"
-        f"- CRITICAL: Do NOT include source names (like \"PubMed\", \"arXiv\", \"bioRxiv\", \"Europe PMC\")\n"
+        f"- 🔴 CRITICAL: Do NOT include source names (like \"PubMed\", \"arXiv\", \"bioRxiv\", \"Europe PMC\")\n"
         f"  inside the query text itself.\n"
+        f"- Avoid words that trigger review/meta-analysis results (\"survey\", \"review\", \"overview\").\n"
     )
     if user_query:
         prompt += f"\nUser interest: {user_query}\n"
 
-    raw = _call_llm(prompt, system_prompt="You output only valid JSON arrays.", call_type='generate_queries')
+    raw = _call_llm(prompt, system_prompt="You output only valid JSON arrays.", call_type='generate_queries',
+                    llm_model=_MODEL_FLASH)
     if not raw:
         return None
 
@@ -447,6 +539,8 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"- Prefer papers that clearly state 'we generated', 'we collected', 'our dataset' → first_hand_data=true, data_origin='author_collected'.\n"
         f"- **CRITICAL: Look for 'Data Availability' and 'Code Availability' sections!**\n"
         f"  Many biological discovery papers deposit data to GEO/SRA/cellxgene and state accessions in these sections.\n"
+        f"  Pay special attention to **KEY_SECTIONS:** — they contain the article's data deposition\n"
+        f"  and code repository information extracted directly from the HTML.\n"
         f"  Scan the text for phrases like:\n"
         f"    * 'Data availability', 'Data deposition', 'Accession numbers', 'Data are available'\n"
         f"    * 'Code availability', 'Code is available at', 'Source code', 'Software availability'\n"
@@ -470,7 +564,7 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
     )
 
     raw = _call_llm(prompt, system_prompt="You are a skilled scientific literature curator.",
-                    temperature=0.2, call_type='extract_paper_details')
+                    temperature=0.2, call_type='extract_paper_details', llm_model=_MODEL_FLASH)
     if not raw:
         return None
 
@@ -518,7 +612,8 @@ def llm_rank_articles(candidates: List[Dict[str, Any]], benchmark_type: str) -> 
         f"Return ONLY valid JSON."
     )
     raw = _call_llm(prompt, system_prompt="You output only valid JSON arrays.",
-                    temperature=0.2, call_type='rank_articles', max_tokens=8192)
+                    temperature=0.2, call_type='rank_articles', max_tokens=16384,
+                    llm_model=_MODEL_PRO)
     if not raw:
         logger.warning('LLM rank_articles did not return content; using original candidate order.')
         return candidates
@@ -703,6 +798,10 @@ def llm_generate_queries_adaptive(
         f"  mechanisms, developmental biology, cell type characterization.\n"
         f"- Papers should have COLLECTED original data and performed BIOLOGICAL analysis.\n"
         f"- Include terms like 'GEO', 'GSE', 'cellxgene' to find papers with deposited data.\n"
+        f"- For PubMed/Europe PMC queries, ALWAYS include 'GEO' or 'GSE'.\n"
+        f"🔴 STRICTLY FORBIDDEN keywords in any query:\n"
+        f"  'tool', 'package', 'pipeline', 'software', 'method', 'algorithm',\n"
+        f"  'framework', 'platform', 'resource', 'workflow', 'protocol'\n"
         f"- Do NOT use method/algorithm keywords (integration, clustering, imputation, etc.).\n"
         f"- Do NOT use source names like 'pubmed', 'arxiv', 'biorxiv' in query text.\n"
         f"- Avoid words that trigger review/meta-analysis results.\n"
@@ -710,7 +809,8 @@ def llm_generate_queries_adaptive(
     if user_query:
         prompt += f"\nUser interest: {user_query}\n"
 
-    raw = _call_llm(prompt, system_prompt='You output only valid JSON arrays.', call_type='generate_queries')
+    raw = _call_llm(prompt, system_prompt='You output only valid JSON arrays.', call_type='generate_queries',
+                    llm_model=_MODEL_FLASH)
     if not raw:
         return None
     result = _parse_llm_json(raw)
@@ -795,7 +895,18 @@ def _recover_almost_accepted(candidates: List[Dict[str, Any]]) -> List[Dict[str,
                 c.get('cellxgene_ids') or
                 c.get('zenodo_data', [])
             )
-            if new_has_code and old_has_data:
+            # Guard against Zenodo-overlap false positive:
+            # if the only "data" is a Zenodo DOI also in code, and relevance is low, skip upgrade
+            _zen_data = set(c.get('zenodo_data', []) or [])
+            _zen_code = set(c.get('zenodo_code', []) or [])
+            _has_other_data = bool(c.get('gse_ids') or c.get('sra_ids') or c.get('cellxgene_ids'))
+            _has_other_code = bool(c.get('github_repos') or c.get('figshare_links'))
+            _zen_overlap_upgrade = (
+                not _has_other_data and not _has_other_code
+                and _zen_data and _zen_data == _zen_code
+                and c.get('relevance_score', 0) < 7
+            )
+            if new_has_code and old_has_data and not _zen_overlap_upgrade:
                 c['acceptance'] = 'FULLY_ACCEPTED'
 
         elif acceptance == 'CODE_ONLY':
@@ -891,6 +1002,9 @@ def _llm_collect_impl(
         n_accepted = sum(
             1 for r in all_results if r.get('acceptance') == 'FULLY_ACCEPTED'
         )
+        n_data = sum(1 for r in all_results if r.get('acceptance') == 'DATA_ONLY')
+        print(f"\n  ══ Round {round_idx + 1}/{min(max_rounds, len(round_configs))} "
+              f"({n_accepted}/{target_accepted} fully accepted so far) ══")
         if n_accepted >= target_accepted and round_idx > 0:
             logger.info(
                 'Target of %d fully accepted papers reached (round %d). Stopping.',
@@ -932,7 +1046,6 @@ def _llm_collect_impl(
             queries.append(_default_queries[len(queries) % len(_default_queries)])
 
         candidate_items: List[Dict[str, Any]] = []
-        from collections import defaultdict
         source_counts: Dict[str, int] = defaultdict(int)
         num_sources = 6  # pubmed + biorxiv + europe_pmc + arxiv + springer_nature + semantic_scholar
         per_source_limit = max(3, max_results // num_sources) * config['per_source_mult']
@@ -949,49 +1062,42 @@ def _llm_collect_impl(
                 return f'title:{title}'
             return ''
 
-        def _source_has_capacity(source_name: str) -> bool:
-            return source_counts[source_name] < per_source_limit
-
-        # Helper used in both search enrichment and per-candidate enrichment
         def _has_enrichment(t: str) -> bool:
             return 'DOI_PAGE_CONTENT' in t or 'FULL_TEXT' in t
 
-        # ----- Unified source search (PubMed + 5 external) -----
+        # ----- Unified source search (PubMed + 5 external) — PARALLEL -----
         _unified_sources = [
-            # Fast sources first — they are less likely to hit slow PDF/DOI enrichment
-            ('semantic_scholar', search_semantic_scholar, min(per_source_limit, 5), (0, 1)),
-            ('springer_nature', search_springer_nature, min(per_source_limit, 5), (2, 3)),
-            ('arxiv', search_arxiv, min(per_source_limit, 5), (4, 5)),
-            ('pubmed', search_pubmed_as_source, min(per_source_limit, 5), (6, 7)),
-            ('biorxiv', search_biorxiv, min(per_source_limit, 5), (8, 9)),
-            ('europe_pmc', search_europe_pmc, min(per_source_limit, 5), (10, 11)),
+            ('semantic_scholar', search_semantic_scholar, min(per_source_limit, 10), (0, 1)),
+            ('springer_nature', search_springer_nature, min(per_source_limit, 10), (2, 3)),
+            ('arxiv', search_arxiv, min(per_source_limit, 10), (4, 5)),
+            ('pubmed', search_pubmed_as_source, min(per_source_limit, 10), (6, 7)),
+            ('biorxiv', search_biorxiv, min(per_source_limit, 10), (8, 9)),
+            ('europe_pmc', search_europe_pmc, min(per_source_limit, 10), (10, 11)),
         ]
-        # Budget: each source may take up to ~60s for search + inline enrichment
         _search_deadline = _time_mod.time() + 60 * len(_unified_sources)
 
-        print(f"\n  ── Round {round_idx + 1}: searching {len(_unified_sources)} sources ──")
-        # Per-round total cap: search + ranking + extraction ≤ 600s (10 min)
+        print(f"\n  ── Round {round_idx + 1}: searching {len(_unified_sources)} sources (parallel) ──")
         _round_hard_deadline = _time_mod.time() + 600
         _round_start = _time_mod.time()
 
-        for source_name, search_fn, call_max, q_indices in _unified_sources:
-            if _time_mod.time() > min(_search_deadline, _round_hard_deadline):
-                print(f"  ⏰ Deadline exceeded, stopping search.")
-                break
-            # Per-source deadline: each source gets at most 60s
-            _source_deadline = _time_mod.time() + 60
-            _src_start = _time_mod.time()
+        # Snapshot shared state for thread-safe dedup
+        _seen_snapshot = seen_keys.copy()
+
+        def _search_one_source(source_name, search_fn, call_max, q_indices):
+            """Search one source — runs in a background thread."""
+            local_items: List[Dict[str, Any]] = []
+            local_seen: set = set()
+            local_count = 0
+            _src_deadline = _time_mod.time() + 60
             queries_for_source = [queries[i] for i in q_indices if i < len(queries)]
             q_short = [q[:60] + '...' if len(q) > 60 else q for q in queries_for_source]
             print(f"  🔍 [{source_name}] query: {q_short[0] if q_short else 'none'}")
-            _src_items_before = len(candidate_items)
             for q_idx in q_indices:
-                if _time_mod.time() > min(_search_deadline, _source_deadline):
-                    print(f"    └─ source deadline reached, moving on")
+                if _time_mod.time() > min(_search_deadline, _src_deadline):
                     break
                 if q_idx >= len(queries):
                     continue
-                if not _source_has_capacity(source_name):
+                if local_count >= call_max:
                     break
                 query = queries[q_idx]
                 results = timed_search(
@@ -999,13 +1105,13 @@ def _llm_collect_impl(
                     max_results=call_max, label=source_name,
                 )
                 for item in results:
-                    if not _source_has_capacity(source_name):
+                    if local_count >= call_max:
                         break
                     dk = _dedup_key(item)
-                    if dk and dk in seen_keys:
+                    if dk and (dk in _seen_snapshot or dk in local_seen):
                         continue
                     if dk:
-                        seen_keys.add(dk)
+                        local_seen.add(dk)
 
                     item_raw = item.get('raw_text') or ''
                     if not item_raw:
@@ -1013,6 +1119,7 @@ def _llm_collect_impl(
                     item_doi = item.get('doi', '') or ''
                     item_id = item.get('id', '') or ''
 
+                    # --- per-source enrichment (same logic as before) ---
                     if source_name in ('europe_pmc', 'biorxiv') and (item_doi or item_id):
                         try:
                             epmc_data = fetch_europe_pmc_fulltext(item_doi or item_id)
@@ -1060,8 +1167,6 @@ def _llm_collect_impl(
                         except Exception:
                             pass
                     elif source_name == 'springer_nature' and item_doi:
-                        # Search phase: use OA API metadata + DOI page only (fast).
-                        # Full PDF download is deferred to the detail extraction phase.
                         try:
                             from literature.core.search import fetch_springer_nature_pdf
                             nat_data = fetch_springer_nature_pdf(item_doi, skip_pdf=True)
@@ -1073,7 +1178,6 @@ def _llm_collect_impl(
                                     item_raw = enriched
                         except Exception:
                             pass
-                        # Also try DOI page as a backstop
                         if not _has_enrichment(item_raw):
                             try:
                                 doi_text = fetch_full_text_by_doi(item_doi)
@@ -1101,7 +1205,6 @@ def _llm_collect_impl(
                                     item_raw = enriched
                         except Exception:
                             pass
-                        # Also try Springer Nature PDF for SS papers (search phase: skip_pdf for speed)
                         if not _has_enrichment(item_raw) and item_doi:
                             try:
                                 nat_data = fetch_springer_nature_pdf(item_doi, skip_pdf=True)
@@ -1114,12 +1217,80 @@ def _llm_collect_impl(
                                 pass
 
                     item['raw_text'] = item_raw
-                    candidate_items.append(item)
-                    source_counts[source_name] += 1
+                    local_items.append(item)
+                    local_count += 1
+            return source_name, local_items, local_seen
 
-            _src_elapsed = _time_mod.time() - _src_start
-            _src_new = source_counts[source_name]
-            print(f"    └─ {_src_new} candidate(s) in {_src_elapsed:.0f}s")
+        # Launch all sources in parallel
+        with ThreadPoolExecutor(max_workers=min(6, len(_unified_sources))) as executor:
+            futures = {}
+            for source_name, search_fn, call_max, q_indices in _unified_sources:
+                if _time_mod.time() > min(_search_deadline, _round_hard_deadline):
+                    break
+                futures[executor.submit(
+                    _search_one_source, source_name, search_fn, call_max, q_indices
+                )] = source_name
+
+            for future in as_completed(futures):
+                source_name = futures[future]
+                try:
+                    src_name, local_items, local_seen = future.result(timeout=75)
+                    for item in local_items:
+                        dk = _dedup_key(item)
+                        if dk and dk in seen_keys:
+                            continue
+                        if dk:
+                            seen_keys.add(dk)
+                        candidate_items.append(item)
+                        source_counts[src_name] += 1
+                    print(f"    └─ {len(local_items)} candidate(s) from [{src_name}]")
+                except Exception as exc:
+                    print(f"    └─ [{source_name}] search failed: {exc}")
+
+        # --- Retry sources that returned 0 candidates ---
+        _zero_sources = [(sn, sf, cm, qi) for sn, sf, cm, qi in _unified_sources
+                         if source_counts.get(sn, 0) == 0]
+        if _zero_sources and _time_mod.time() < _round_hard_deadline:
+            print(f"\n  🔄 {len(_zero_sources)} source(s) returned 0 candidates — generating retry queries...")
+            # Ask LLM for 1 simplified query per failing source
+            _zero_names = [sn for sn, _, _, _ in _zero_sources]
+            _retry_prompt = (
+                f"Generate **{len(_zero_names)}** simplified, broad single-cell biology "
+                f"search queries — one per source listed below. Each query must include "
+                f"'single-cell' or 'scRNA-seq' and 'GEO' or 'GSE'. Keep each under "
+                f"120 chars. Return ONLY a JSON array of strings.\n"
+                f"Sources that need queries: {', '.join(_zero_names)}"
+            )
+            _retry_raw = _call_llm(_retry_prompt,
+                                   system_prompt='You output only valid JSON arrays.',
+                                   call_type='retry_queries', llm_model=_MODEL_FLASH,
+                                   max_tokens=512)
+            _retry_queries = _parse_llm_json(_retry_raw or '[]') if _retry_raw else []
+            if isinstance(_retry_queries, list) and _retry_queries:
+                for idx, (sn, sf, cm, qi) in enumerate(_zero_sources):
+                    if idx >= len(_retry_queries):
+                        break
+                    _rq = _retry_queries[idx]
+                    if not isinstance(_rq, str) or not _rq.strip():
+                        continue
+                    _rq = _rq.strip()[:150]
+                    print(f"  🔄 [{sn}] retry query: {_rq[:80]}")
+                    _retry_results = timed_search(sf, _search_deadline, _rq,
+                                                  max_results=min(cm, 8), label=f'{sn}_retry')
+                    _added = 0
+                    for item in (_retry_results or []):
+                        dk = _dedup_key(item)
+                        if dk and dk in seen_keys:
+                            continue
+                        if dk:
+                            seen_keys.add(dk)
+                        item_raw = item.get('raw_text') or item.get('summary') or ''
+                        item['raw_text'] = item_raw
+                        candidate_items.append(item)
+                        source_counts[sn] += 1
+                        _added += 1
+                    if _added:
+                        print(f"    └─ retry added {_added} candidate(s) from [{sn}]")
 
         if not candidate_items:
             print(f"  ⚠️  Round {round_idx + 1}: no candidates found from any source.")
@@ -1130,10 +1301,14 @@ def _llm_collect_impl(
             print(f"  ⏰ Round hard deadline exceeded, skipping ranking/extraction.")
             continue
 
-        # Rank candidates
-        ranked_items = llm_rank_articles(candidate_items, benchmark_type)
-        if ranked_items:
-            candidate_items = ranked_items
+        # Rank candidates (with error resilience)
+        try:
+            ranked_items = llm_rank_articles(candidate_items, benchmark_type)
+            if ranked_items:
+                candidate_items = ranked_items
+        except Exception as exc:
+            logger.warning('llm_rank_articles crashed (round %d): %s — using unsorted candidates.', round_idx + 1, exc)
+            # continue with unsorted candidates — better than losing the round
 
         # --- Extract paper details and filter ---
         round_results: List[Dict[str, Any]] = []
@@ -1313,9 +1488,21 @@ def _llm_collect_impl(
                 try:
                     sn_html = fetch_springer_nature_fulltext_html(doi)
                     if sn_html and len(sn_html) > 500:
-                        text += f"\n\nFULL_TEXT:\n{sn_html}"
-                except Exception:
-                    pass
+                        # Move SUPPLEMENTARY_SECTIONS to the front so they fit within the
+                        # 16000-char limit of llm_extract_paper_details. Data/Code availability
+                        # sections are at positions 60000+ in the raw body text, but the LLM
+                        # extractor only sees the first 16000 chars. By pulling these critical
+                        # sections forward, the LLM can find GSE/GitHub/DOI references.
+                        _supp_marker = '\n\nSUPPLEMENTARY_SECTIONS:\n'
+                        _supp_idx = sn_html.find(_supp_marker)
+                        if _supp_idx >= 0:
+                            _supp_part = sn_html[_supp_idx + len(_supp_marker):]
+                            _main_part = sn_html[:_supp_idx]
+                            text += f"\n\nKEY_SECTIONS:\n{_supp_part}\n\nFULL_TEXT:\n{_main_part}"
+                        else:
+                            text += f"\n\nFULL_TEXT:\n{sn_html}"
+                except Exception as exc:
+                    logger.warning('Springer Nature HTML fetch failed for %s: %s', doi, exc)
                 if not _has_enrichment(text):
                     try:
                         doi_text = fetch_full_text_by_doi(doi)
@@ -1445,6 +1632,22 @@ def _llm_collect_impl(
             has_data = bool(gse or sra or cellxgene or zenodo_data)
             has_code = bool(github_repos or zenodo_code or figshare_links)
 
+            # --- Detect method-paper Zenodo overlap ---
+            # When the SAME Zenodo DOI is in both data and code lists,
+            # and there's no other evidence (GSE/SRA/cellxgene/GitHub/Figshare),
+            # the paper is likely a method/tool paper, not a data paper.
+            # Downgrade: don't count Zenodo as "data" unless first_hand_data or high relevance.
+            _zen_overlap = set(zenodo_data) & set(zenodo_code)
+            _has_other_data = bool(gse or sra or cellxgene)
+            _has_other_code = bool(github_repos or figshare_links)
+            if not _has_other_data and not _has_other_code and _zen_overlap and len(_zen_overlap) == len(zenodo_data):
+                # All data comes from Zenodo, and all Zenodo data is also in code
+                _first_hand = llm_data.get('first_hand_data')
+                if isinstance(_first_hand, str):
+                    _first_hand = _first_hand.lower() in ('true', 'yes', '1')
+                if not _first_hand and relevance < 7:
+                    has_data = False  # downgrade: Zenodo overlap is likely tool/data not real dataset
+
             # --- Tiered acceptance ---
             if has_data and has_code:
                 acceptance = 'FULLY_ACCEPTED'
@@ -1453,7 +1656,17 @@ def _llm_collect_impl(
             elif not has_data and has_code:
                 acceptance = 'CODE_ONLY'
             else:
-                acceptance = 'REJECTED'
+                # No explicit accessions — check LLM's first_hand_data signal
+                _first_hand = llm_data.get('first_hand_data')
+                if isinstance(_first_hand, str):
+                    _first_hand = _first_hand.lower() in ('true', 'yes', '1')
+                if _first_hand and relevance >= 7:
+                    acceptance = 'DATA_ONLY'
+                    # Mark inferred — accessions likely in supplementary/full text
+                    if not gse:
+                        gse = ['INFERRED_DATA']
+                else:
+                    acceptance = 'REJECTED'
 
             skip_reason_parts = []
             if not has_data:
@@ -1461,6 +1674,8 @@ def _llm_collect_impl(
             if not has_code:
                 skip_reason_parts.append('no code repositories (GitHub/Zenodo code/Figshare) found')
             skip_reason = '; '.join(skip_reason_parts) if skip_reason_parts else 'none'
+            if acceptance == 'DATA_ONLY' and 'INFERRED_DATA' in gse:
+                skip_reason += ' (inferred from first_hand_data + high relevance score)'
 
             _audit_call(
                 'filter_decision', f"Candidate {candidate.get('id', '?')}",

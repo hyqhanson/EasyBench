@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# OmicsClaw repo root (one level above skills/)
+_OMICSCLAW_ROOT = _PROJECT_ROOT.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / 'skills'))
@@ -27,9 +29,9 @@ sys.path.insert(0, str(_PROJECT_ROOT / 'skills'))
 from orchestrator.benchmark_dispatch.benchmark_dispatch import (
     collect_benchmark_data,
     generate_search_queries,
-    download_collected_datasets,
     generate_workflow_plan,
     save_results,
+    save_accepted_papers,
 )
 from orchestrator.reproduce_paper.reproduce_paper import run_reproduce
 from orchestrator.reproducibility_evaluation.reproducibility_evaluation import (
@@ -126,14 +128,18 @@ def run_stage_dispatch(
         dispatch_dir, no_download, use_llm=use_llm,
     )
 
-    if not no_download:
-        print('\n  Downloading candidate datasets...')
-        collected_data['download_results'] = download_collected_datasets(
-            collected_data, dispatch_dir / 'downloaded_data',
-        )
-
     workflow_plan = generate_workflow_plan(benchmark_type, collected_data)
     save_results(workflow_plan, collected_data, dispatch_dir)
+
+    # Save FULLY_ACCEPTED papers to per-benchmark, per-paper folder structure
+    _benchmark_data_root = _OMICSCLAW_ROOT / 'benchmark_data'
+    accepted_summary = save_accepted_papers(
+        collected_data,
+        _benchmark_data_root,
+        benchmark_type,
+        download_data=not no_download,
+    )
+    collected_data['accepted_papers_summary'] = accepted_summary
 
     summary['stages']['00_benchmark_dispatch'] = {
         'status': 'completed',
@@ -145,6 +151,8 @@ def run_stage_dispatch(
             'cellxgene': len(collected_data.get('datasets', {}).get('cellxgene', [])),
         },
         'total_relevance_score': collected_data.get('total_relevance_score', 0),
+        'accepted_papers_saved': accepted_summary.get('saved_count', 0),
+        'accepted_papers_dir': str(_benchmark_data_root / benchmark_type),
     }
     save_summary(output_dir, summary)
 
@@ -227,7 +235,21 @@ def run_stage_process_data(
     summary: Dict[str, Any],
     no_process: bool = False,
 ) -> Dict[str, Any]:
-    """Stage 1: process downloaded datasets through OmicsClaw sc tools."""
+    """Stage 1: process downloaded datasets through OmicsClaw sc tools.
+
+    Reads paper_metadata.json for each FULLY_ACCEPTED paper in
+    benchmark_data/{type}/, discovers data files of all supported formats
+    (.h5ad, .mtx, 10X directories, .csv, .txt.gz), and runs:
+
+        1. sc-standardize-input  → canonical AnnData
+        2. sc-preprocessing      → QC + normalize + HVG + PCA
+
+    Output: ``01_process_data/{paper_slug}/{dataset}/standardize/processed.h5ad``
+            and ``.../preprocess/processed.h5ad``
+
+    The benchmark analysis (e.g. sc-batch-integration) runs in Stage 4,
+    not here — Stage 1 only prepares clean, preprocessed data.
+    """
     process_dir = stage_dir(output_dir, 1, 'process_data')
     process_dir.mkdir(parents=True, exist_ok=True)
 
@@ -241,90 +263,334 @@ def run_stage_process_data(
         save_summary(output_dir, summary)
         return {'processed': [], 'status': 'skipped'}
 
-    # Find downloaded h5ad/mtx files
-    dispatch_dir = stage_dir(output_dir, 0, 'benchmark_dispatch')
-    data_dirs = list(dispatch_dir.glob('downloaded_data/**/*.h5ad'))
-    data_dirs += list(dispatch_dir.glob('downloaded_data/**/*.mtx'))
-    data_dirs += list(dispatch_dir.glob('downloaded_data/**/matrix.mtx*'))
+    bm_type = summary.get('metadata', {}).get('benchmark_type', '')
+    benchmark_data_root = _OMICSCLAW_ROOT / 'benchmark_data' / bm_type
 
-    if not data_dirs:
-        print('  No downloaded data files found. Run without --no-download first.')
-        summary['stages']['01_process_data'] = {'status': 'skipped', 'reason': 'No data files'}
+    if not benchmark_data_root.exists():
+        print(f'  No benchmark data found at: {benchmark_data_root}')
+        summary['stages']['01_process_data'] = {'status': 'skipped', 'reason': 'No benchmark data dir'}
         save_summary(output_dir, summary)
         return {'processed': [], 'status': 'skipped'}
 
+    # ── Discover papers ──
+    papers = _discover_papers(benchmark_data_root)
+    if not papers:
+        print('  No papers with data found.')
+        summary['stages']['01_process_data'] = {'status': 'skipped', 'reason': 'No papers'}
+        save_summary(output_dir, summary)
+        return {'processed': [], 'status': 'skipped'}
+
+    print(f'  Found {len(papers)} paper(s) with data to process.\n')
+
     processed = []
-    for data_path in data_dirs[:3]:  # process up to 3 datasets
-        dataset_name = data_path.parent.name
-        dataset_out = process_dir / dataset_name
-        dataset_out.mkdir(parents=True, exist_ok=True)
-
-        # Determine which OmicsClaw skill to use based on file type
-        suffix = data_path.suffix.lower()
-        if suffix == '.h5ad':
-            # Try running sc-preprocessing on the h5ad
-            print(f'  Processing: {data_path.name}')
-            skill_result = _run_omicsclaw_skill(
-                'sc-preprocessing',
-                input_path=str(data_path),
-                output_dir=str(dataset_out),
-            )
-            processed.append({
-                'file': str(data_path),
-                'skill': 'sc-preprocessing',
-                'success': skill_result.get('success', False),
-                'output': str(dataset_out),
-            })
-
-            # If preprocessing succeeded, try benchmark-relevant skill
-            if skill_result.get('success'):
-                processed_h5ad = dataset_out / 'processed.h5ad'
-                if processed_h5ad.exists():
-                    # Determine which skill based on benchmark type
-                    bm_type = summary.get('metadata', {}).get('benchmark_type', '')
-                    analysis_skill = _benchmark_to_skill(bm_type)
-                    if analysis_skill:
-                        analysis_out = dataset_out / analysis_skill
-                        analysis_out.mkdir(exist_ok=True)
-                        print(f'    → Running {analysis_skill}...')
-                        _run_omicsclaw_skill(
-                            analysis_skill,
-                            input_path=str(processed_h5ad),
-                            output_dir=str(analysis_out),
-                        )
-
-        elif suffix == '.mtx' or 'matrix.mtx' in str(data_path):
-            print(f'  Found mtx data (needs conversion): {data_path.parent.name}')
-            processed.append({
-                'file': str(data_path),
-                'skill': None,
-                'success': False,
-                'note': 'MTX format requires scanpy read before processing',
-            })
+    for paper in papers:
+        paper_result = _process_one_paper(
+            paper, process_dir, bm_type, output_dir, summary
+        )
+        processed.append(paper_result)
 
     summary['stages']['01_process_data'] = {
         'status': 'completed',
         'output_dir': str(process_dir),
-        'datasets_processed': len(processed),
+        'papers_processed': len(processed),
         'results': processed,
     }
     save_summary(output_dir, summary)
     return {'processed': processed, 'status': 'completed'}
 
 
+# ---------------------------------------------------------------------------
+# Paper discovery & per-paper processing
+# ---------------------------------------------------------------------------
+
+def _discover_papers(benchmark_data_root: Path) -> List[Dict[str, Any]]:
+    """Find all papers in benchmark_data/{type}/ that have data files."""
+    papers = []
+    for paper_dir in sorted(benchmark_data_root.iterdir()):
+        if not paper_dir.is_dir() or paper_dir.name.startswith('_'):
+            continue
+        meta_path = paper_dir / 'paper_metadata.json'
+        if not meta_path.exists():
+            continue
+
+        metadata = json.loads(meta_path.read_text(encoding='utf-8'))
+        data_dir = paper_dir / 'data'
+        if not data_dir.exists():
+            continue
+
+        # Find all data files that smart_load can handle
+        data_files = _find_sc_data_files(data_dir)
+        if not data_files:
+            continue
+
+        papers.append({
+            'slug': paper_dir.name,
+            'dir': paper_dir,
+            'data_dir': data_dir,
+            'metadata': metadata,
+            'data_files': data_files,
+        })
+    return papers
+
+
+def _find_sc_data_files(data_dir: Path) -> List[Path]:
+    """Find single-cell data files/directories that OmicsClaw can load.
+
+    Priority order:
+      1. .h5ad files
+      2. 10X mtx directories (containing matrix.mtx + barcodes + features)
+      3. Standalone .mtx/.mtx.gz files (with companion files)
+      4. .h5 files (10X HDF5)
+      5. .csv/.tsv count matrices
+      6. .txt.gz count matrices
+      7. .tar archives (will be extracted later)
+    """
+    found = []
+
+    # 1. .h5ad — best format
+    for f in data_dir.rglob('*.h5ad'):
+        if f.stat().st_size > 1024:
+            found.append(f)
+
+    # 2. 10X mtx directories — detect matrix.mtx + barcodes + features
+    for matrix_file in data_dir.rglob('matrix.mtx*'):
+        parent = matrix_file.parent
+        has_barcodes = any(parent.glob('barcodes.tsv*'))
+        has_features = any(parent.glob('features.tsv*')) or any(parent.glob('genes.tsv*'))
+        if has_barcodes and has_features:
+            found.append(parent)  # Directory path
+        elif '_fixed_10x' in str(parent):
+            found.append(parent)
+
+    # 3. Standalone .mtx.gz with companion annotation files
+    for mtx_file in data_dir.rglob('*.mtx*'):
+        if mtx_file.stat().st_size > 1024:
+            found.append(mtx_file)
+
+    # 4. .h5 files (10X HDF5)
+    for f in data_dir.rglob('*.h5'):
+        if f.stat().st_size > 1024:
+            found.append(f)
+
+    # 5. .rds files (Seurat R objects)
+    for f in data_dir.rglob('*.rds'):
+        if f.stat().st_size > 1024:
+            found.append(f)
+
+    # 6. .csv/.tsv/.txt expression matrices
+    for f in data_dir.rglob('*_matrix_expression_*.csv*'):
+        if f.stat().st_size > 1024:
+            found.append(f)
+    for f in data_dir.rglob('*_raw_count*.txt*'):
+        if f.stat().st_size > 1024:
+            found.append(f)
+    for f in data_dir.rglob('*_count*.csv*'):
+        if f.stat().st_size > 1024:
+            found.append(f)
+
+    # 7. .tar archives (GEO RAW tars containing extracted data)
+    for f in data_dir.rglob('*_RAW.tar'):
+        # Prefer extracted contents if available
+        extracted_dir = f.parent / 'extracted'
+        if extracted_dir.exists() and any(extracted_dir.iterdir()):
+            mtx_in_extracted = list(extracted_dir.rglob('*.mtx*'))
+            if mtx_in_extracted:
+                # Use the extracted 10X-style directories
+                for mtx in mtx_in_extracted:
+                    p = mtx.parent
+                    if any(p.glob('barcodes*')) or any(p.glob('genes*')):
+                        if p not in found:
+                            found.append(p)
+                continue
+        found.append(f)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for f in found:
+        key = str(f.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    return unique
+
+
+def _process_one_paper(
+    paper: Dict[str, Any],
+    process_dir: Path,
+    bm_type: str,
+    output_dir: Path,
+    summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Process one paper's data through OmicsClaw pipeline."""
+    slug = paper['slug']
+    data_files = paper['data_files']
+    metadata = paper['metadata']
+
+    paper_out = process_dir / slug
+    paper_out.mkdir(parents=True, exist_ok=True)
+
+    print(f'  📄 [{slug[:55]}]')
+    print(f'     Data files: {len(data_files)}')
+
+    results = []
+    for data_path in data_files:
+        result = _process_one_dataset(
+            data_path, paper_out, bm_type, metadata
+        )
+        results.append(result)
+
+    # Save per-paper result
+    result_path = paper_out / 'stage1_result.json'
+    result_path.write_text(json.dumps({
+        'paper': slug,
+        'datasets_processed': len(results),
+        'results': results,
+    }, indent=2))
+
+    return {
+        'paper': slug,
+        'datasets_processed': len(results),
+        'results': results,
+    }
+
+
+def _process_one_dataset(
+    data_path: Path,
+    paper_out: Path,
+    bm_type: str,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Process a single dataset through standardize → preprocess.
+
+    Outputs a clean ``processed.h5ad`` ready for downstream stages.
+    The benchmark analysis (e.g. sc-batch-integration) runs in Stage 4.
+    """
+    name = data_path.name if data_path.is_file() else data_path.parent.name
+    dataset_out = paper_out / _sanitize(name)
+    dataset_out.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        'input': str(data_path),
+        'input_type': 'directory' if data_path.is_dir() else 'file',
+        'steps': {},
+    }
+
+    # ── Step 1: sc-standardize-input (canonical AnnData) ──
+    std_dir = dataset_out / 'standardize'
+    std_dir.mkdir(exist_ok=True)
+    print(f'     → sc-standardize-input: {data_path.name if data_path.is_file() else data_path.parent.name}')
+
+    skill_result = _run_omicsclaw_skill(
+        'sc-standardize-input',
+        input_path=str(data_path),
+        output_dir=str(std_dir),
+    )
+    result['steps']['standardize'] = skill_result
+
+    if not skill_result.get('success'):
+        result['status'] = 'failed_standardize'
+        return result
+
+    processed_h5ad = std_dir / 'processed.h5ad'
+    if not processed_h5ad.exists():
+        result['status'] = 'no_output_h5ad'
+        return result
+
+    # ── Step 2: sc-preprocessing (QC + normalize + HVG + PCA) ──
+    pre_dir = dataset_out / 'preprocess'
+    pre_dir.mkdir(exist_ok=True)
+    print(f'     → sc-preprocessing (scanpy)')
+
+    skill_result = _run_omicsclaw_skill(
+        'sc-preprocessing',
+        input_path=str(processed_h5ad),
+        output_dir=str(pre_dir),
+    )
+    result['steps']['preprocess'] = skill_result
+
+    if not skill_result.get('success'):
+        result['status'] = 'failed_preprocess'
+        return result
+
+    result['status'] = 'completed'
+    return result
+
+
+def _sanitize(name: str, max_len: int = 40) -> str:
+    """Sanitize a name for use as a directory name."""
+    import re as _re
+    name = _re.sub(r'[^\w\-.]', '_', name)
+    return name[:max_len].rstrip('_')
+
+
+# ---------------------------------------------------------------------------
+# Skill runner
+# ---------------------------------------------------------------------------
+
+# Map skill-name → actual Python module file name
+_SKILL_MODULE_MAP: Dict[str, str] = {
+    'sc-ambient-removal':       'sc_ambient',
+    'sc-batch-integration':     'sc_integrate',
+    'sc-cell-annotation':       'sc_annotate',
+    'sc-cell-communication':    'sc_cell_communication',
+    'sc-clustering':            'sc_cluster',
+    'sc-count':                 'sc_count',
+    'sc-cytotrace':             'sc_cytotrace',
+    'sc-de':                    'sc_de',
+    'sc-differential-abundance':'sc_differential_abundance',
+    'sc-doublet-detection':     'sc_doublet',
+    'sc-drug-response':         'sc_drug_response',
+    'sc-enrichment':            'sc_enrichment',
+    'sc-fastq-qc':              'sc_fastq_qc',
+    'sc-filter':                'sc_filter',
+    'sc-gene-programs':         'sc_gene_programs',
+    'sc-grn':                   'sc_grn',
+    'sc-in-silico-perturbation':'sc_in_silico_perturbation',
+    'sc-markers':               'sc_markers',
+    'sc-metacell':              'sc_metacell',
+    'sc-multi-count':           'sc_multi_count',
+    'sc-pathway-scoring':       'sc_pathway_scoring',
+    'sc-perturb':               'sc_perturb',
+    'sc-perturb-prep':          'sc_perturb_prep',
+    'sc-preprocessing':         'sc_preprocess',
+    'sc-pseudotime':            'sc_pseudotime',
+    'sc-qc':                    'sc_qc',
+    'sc-standardize-input':     'sc_standardize_input',
+    'sc-velocity':              'sc_velocity',
+    'sc-velocity-prep':         'sc_velocity_prep',
+}
+
+
 def _run_omicsclaw_skill(skill_name: str, input_path: str, output_dir: str) -> Dict:
-    """Run an OmicsClaw skill via subprocess (same pattern as omicsclaw.py)."""
+    """Run an OmicsClaw skill via subprocess.
+
+    Uses the _SKILL_MODULE_MAP to find the correct Python module name
+    for each skill (skill directory names differ from .py file names).
+    """
     import subprocess as sp
     import sys as _sys
+
+    module_name = _SKILL_MODULE_MAP.get(skill_name)
+    if module_name is None:
+        return {'success': False, 'error': f'Unknown skill: {skill_name}'}
+
+    module_path = f'skills.singlecell.scrna.{skill_name}.{module_name}'
+
     try:
-        cmd = [_sys.executable, '-m', f'skills.singlecell.scrna.{skill_name}.{skill_name.replace("-", "_")}',
-               '--input', input_path, '--output', output_dir]
+        cmd = [
+            _sys.executable, '-m', module_path,
+            '--input', input_path,
+            '--output', output_dir,
+        ]
         completed = sp.run(cmd, capture_output=True, text=True, timeout=1800)
         return {
             'success': completed.returncode == 0,
-            'stdout': completed.stdout[-500:],
-            'stderr': completed.stderr[-500:],
+            'stdout': completed.stdout[-500:] if completed.stdout else '',
+            'stderr': completed.stderr[-500:] if completed.stderr else '',
         }
+    except sp.TimeoutExpired:
+        return {'success': False, 'error': f'Timeout (1800s) running {skill_name}'}
     except Exception as exc:
         return {'success': False, 'error': str(exc)}
 
@@ -336,6 +602,10 @@ def _benchmark_to_skill(benchmark_type: str) -> Optional[str]:
         'clustering': 'sc-clustering',
         'annotation': 'sc-cell-annotation',
         'trajectory': 'sc-pseudotime',
+        'doublet_detection': 'sc-doublet-detection',
+        'de': 'sc-de',
+        'grn': 'sc-grn',
+        'cell_communication': 'sc-cell-communication',
     }
     return mapping.get(benchmark_type)
 

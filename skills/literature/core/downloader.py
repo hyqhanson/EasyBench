@@ -1,4 +1,4 @@
-"""Download datasets from GEO, SRA, and cellxgene."""
+"""Download datasets from GEO, SRA, Zenodo, and cellxgene."""
 
 import json
 import re
@@ -9,6 +9,27 @@ from pathlib import Path
 from typing import Dict, List
 
 import requests
+import urllib3
+
+# Disable InsecureRequestWarning for verify=False fallbacks
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def _get_session():
+    """Create a requests Session that bypasses the system proxy.
+
+    System proxies (e.g. Clash, V2Ray) can interfere with NCBI/Zenodo
+    API calls.  Using ``trust_env=False`` routes requests directly.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
+def _get(url: str, timeout: int = 30, stream: bool = False):
+    """Perform a GET request bypassing the system proxy."""
+    session = _get_session()
+    return session.get(url, timeout=timeout, stream=stream)
 
 
 def download_geo_dataset(gse_id: str, output_dir: Path, max_retries: int = 3) -> Dict:
@@ -52,7 +73,8 @@ def fetch_geo_metadata(gse_id: str) -> Dict:
     """Fetch GEO metadata via NCBI E-utilities."""
     try:
         url = f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={gse_id}&targ=self&form=text&view=quick"
-        response = requests.get(url, timeout=30)
+        session = _get_session()
+        response = session.get(url, timeout=30)
         response.raise_for_status()
 
         text = response.text
@@ -84,26 +106,101 @@ def extract_samples(text: str) -> List[str]:
     return re.findall(pattern, text)
 
 
-def download_supplementary_files(gse_id: str, output_dir: Path, max_retries: int = 3) -> List[str]:
-    """Download supplementary files from GEO FTP."""
+def download_supplementary_files(gse_id: str, output_dir: Path, max_retries: int = 3,
+                              max_total_gb: float = 20.0) -> List[str]:
+    """Download supplementary files from GEO FTP.
+
+    Files are prioritized: count matrices (.mtx, .h5ad, .h5, .tar) come
+    first, followed by annotation files (.csv, .tsv).  A total download
+    size budget (default 20 GB) prevents runaway downloads.
+    """
     downloaded = []
 
     try:
         gse_prefix = gse_id[:-3] + 'nnn'
         ftp_base = f"https://ftp.ncbi.nlm.nih.gov/geo/series/{gse_prefix}/{gse_id}/suppl/"
 
-        response = requests.get(ftp_base, timeout=30)
+        session = _get_session()
+        response = session.get(ftp_base, timeout=30)
         if response.status_code != 200:
             return downloaded
 
-        file_links = re.findall(r'href="([^"]+\.(h5ad|mtx|csv|tsv|txt|gz|tar))"', response.text, re.IGNORECASE)
+        # Parse file listing: extract (filename, size_bytes)
+        # File rows look like: <a href="file.mtx.gz">file.mtx.gz</a>  2023-03-28 10:10  3.5G
+        file_entries = []
+        for line in response.text.split('\n'):
+            # Extract href
+            href_m = re.search(r'href="([^"]+)"', line)
+            if not href_m:
+                continue
+            filename = href_m.group(1)
+            # Skip navigation links
+            if not filename or filename == '/' or 'Parent Directory' in line:
+                continue
+            if filename.startswith('/'):
+                continue
 
-        for filename, _ in file_links[:10]:
+            # Extract size from the last column (e.g. "3.5G", "519K", "   -  ")
+            size = 0
+            size_m = re.search(r'([\d.]+)\s*([KMGT])?\s*$', line.strip())
+            if size_m:
+                try:
+                    size_val = float(size_m.group(1))
+                    unit = (size_m.group(2) or 'B').upper()
+                    if unit == 'K':
+                        size = int(size_val * 1024)
+                    elif unit == 'M':
+                        size = int(size_val * 1024 ** 2)
+                    elif unit == 'G':
+                        size = int(size_val * 1024 ** 3)
+                    elif unit == 'T':
+                        size = int(size_val * 1024 ** 4)
+                except ValueError:
+                    pass
+
+            file_entries.append((filename, size))
+
+        # Fallback: simpler regex if the size parsing didn't work
+        if not file_entries:
+            links = re.findall(r'href="([^"]+)"', response.text)
+            for fname in links:
+                if fname in ('Parent Directory', '/', ''):
+                    continue
+                if fname.startswith('/'):
+                    continue
+                file_entries.append((fname, 0))
+
+        # Priority: data files first, then annotation/metadata
+        _DATA_EXT = {'.mtx', '.h5ad', '.h5', '.loom', '.tar', '.rds', '.h5seurat'}
+        def _is_data_file(fname):
+            low = fname.lower()
+            # Handle compound extensions like .mtx.gz, .csv.gz
+            for ext in _DATA_EXT:
+                if low.endswith(ext) or low.endswith(ext + '.gz'):
+                    return True
+            return False
+
+        data_files = [(f, s) for f, s in file_entries if _is_data_file(f)]
+        other_files = [(f, s) for f, s in file_entries if not _is_data_file(f)]
+
+        max_bytes = int(max_total_gb * 1024 ** 3)
+        total_downloaded = 0
+
+        # Download data files first, then others
+        for filename, fsize in data_files + other_files:
+            # Skip if we'd exceed the budget (only for known-size files)
+            if fsize > 0 and total_downloaded + fsize > max_bytes:
+                print(f"  Skipping {filename} ({fsize / 1e9:.1f} GB) — would exceed {max_total_gb} GB budget")
+                continue
+
             file_url = ftp_base + filename
             output_file = output_dir / filename
 
             if _download_file(file_url, output_file, max_retries):
                 downloaded.append(str(output_file))
+                # Update size from actual file
+                if output_file.exists():
+                    total_downloaded += output_file.stat().st_size
 
     except Exception as e:
         print(f"Error downloading supplementary files: {e}")
@@ -112,7 +209,12 @@ def download_supplementary_files(gse_id: str, output_dir: Path, max_retries: int
 
 
 def download_sra_dataset(sra_id: str, output_dir: Path, max_retries: int = 3, download_fastq: bool = False) -> Dict:
-    """Download metadata and candidate files for an SRA accession."""
+    """Download metadata and candidate files for an SRA or BioProject accession.
+
+    Supports:
+      - SRA accessions (SRP, SRX, SRR, SRS)
+      - BioProject IDs (PRJNA, PRJEB, PRJDB) — auto-resolved to SRA records
+    """
     sra_id = sra_id.upper().strip()
     sra_dir = output_dir / sra_id
     sra_dir.mkdir(parents=True, exist_ok=True)
@@ -152,11 +254,58 @@ def download_sra_dataset(sra_id: str, output_dir: Path, max_retries: int = 3, do
     return result
 
 
-def fetch_sra_metadata(sra_id: str) -> Dict:
-    """Fetch SRA metadata via NCBI E-utilities."""
+def _is_bioproject_id(accession: str) -> bool:
+    """Check if an accession is a BioProject ID (PRJNA/PRJEB/PRJDB prefix)."""
+    return bool(re.match(r'^(PRJNA|PRJEB|PRJDB)\d+$', accession, re.IGNORECASE))
+
+
+def _resolve_bioproject_to_sra_ids(bioproject_id: str) -> List[str]:
+    """Resolve a BioProject ID to its SRA experiment/study accessions.
+
+    Returns a list of UID strings that can be used with db=sra efetch.
+    """
     try:
-        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=sra&id={sra_id}&retmode=xml"
-        response = requests.get(url, timeout=30)
+        # Step 1: search SRA for records linked to this BioProject
+        session = _get_session()
+        search_url = (
+            f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+            f"?db=sra&term={bioproject_id}[All Fields]&retmax=500&retmode=xml"
+        )
+        response = session.get(search_url, timeout=30)
+        response.raise_for_status()
+        root = ET.fromstring(response.text)
+        uid_list = root.findall('.//IdList/Id')
+        sra_uids = [uid.text for uid in uid_list if uid.text]
+        if sra_uids:
+            print(f"  Resolved {bioproject_id} → {len(sra_uids)} SRA record(s)")
+        return sra_uids
+    except Exception as e:
+        print(f"Error resolving BioProject {bioproject_id} to SRA: {e}")
+        return []
+
+
+def fetch_sra_metadata(sra_id: str) -> Dict:
+    """Fetch SRA metadata via NCBI E-utilities.
+
+    Supports:
+      - SRA accessions (SRP, SRX, SRR, SRS)
+      - BioProject IDs (PRJNA, PRJEB, PRJDB) — auto-resolved to SRA records
+    """
+    try:
+        actual_id = sra_id
+
+        # Handle BioProject IDs: resolve to SRA UIDs first
+        if _is_bioproject_id(sra_id):
+            sra_uids = _resolve_bioproject_to_sra_ids(sra_id)
+            if not sra_uids:
+                print(f"Could not resolve BioProject {sra_id} to any SRA records")
+                return {}
+            # Use the first batch of UIDs (NCBI accepts comma-separated)
+            actual_id = ','.join(sra_uids[:20])
+
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=sra&id={actual_id}&retmode=xml"
+        session = _get_session()
+        response = session.get(url, timeout=60)
         response.raise_for_status()
 
         root = ET.fromstring(response.text)
@@ -306,7 +455,7 @@ def fetch_cellxgene_metadata(identifier: str) -> Dict:
 
         # First try collection API
         try:
-            resp = requests.get(f'{CELLXGENE_API}/dp/v1/collections/{uuid}', timeout=30)
+            resp = _get(f'{CELLXGENE_API}/dp/v1/collections/{uuid}', timeout=30)
             if resp.ok:
                 data = resp.json()
                 meta['title'] = data.get('name', '') or data.get('title', '')
@@ -322,7 +471,7 @@ def fetch_cellxgene_metadata(identifier: str) -> Dict:
 
         # Fallback: treat the uuid as a single dataset ID
         try:
-            resp = requests.get(f'{CELLXGENE_API}/dp/v1/datasets/{uuid}', timeout=30)
+            resp = _get(f'{CELLXGENE_API}/dp/v1/datasets/{uuid}', timeout=30)
             if resp.ok:
                 data = resp.json()
                 meta['title'] = data.get('name', '') or data.get('title', '')
@@ -344,7 +493,7 @@ def fetch_cellxgene_metadata(identifier: str) -> Dict:
     page_url = f'https://cellxgene.cziscience.com/d/{slug}'
     meta['page_url'] = page_url
     try:
-        resp = requests.get(page_url, timeout=30)
+        resp = _get(page_url, timeout=30)
         resp.raise_for_status()
         html = resp.text
         meta['title'] = slug
@@ -361,10 +510,104 @@ def _looks_like_uuid(value: str) -> bool:
     return bool(re.match(rf'^{UUID_PATTERN}$', value, re.IGNORECASE))
 
 
+def download_from_zenodo(zenodo_url: str, output_dir: Path, max_retries: int = 3) -> Dict:
+    """Download dataset from a Zenodo record (DOI or record URL).
+
+    Accepts:
+      - Zenodo DOI: ``https://doi.org/10.5281/zenodo.17259745``
+      - Record URL: ``https://zenodo.org/records/17259745``
+      - Record ID:  ``17259745``
+    """
+    import re as _re
+
+    zenodo_url = zenodo_url.strip()
+
+    # Extract record ID from various formats
+    record_match = _re.search(r'zenodo[./](\d+)', zenodo_url)
+    if not record_match:
+        # Try as a bare number
+        if _re.match(r'^\d+$', zenodo_url):
+            record_id = zenodo_url
+        else:
+            return {
+                'zenodo_id': zenodo_url,
+                'source': 'zenodo',
+                'status': 'failed',
+                'files': [],
+                'errors': [f'Could not extract Zenodo record ID from: {zenodo_url}'],
+            }
+    else:
+        record_id = record_match.group(1)
+
+    record_dir = output_dir / f'zenodo_{record_id}'
+    record_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        'zenodo_id': record_id,
+        'source': 'zenodo',
+        'status': 'pending',
+        'files': [],
+        'errors': [],
+    }
+
+    try:
+        # Fetch record metadata via Zenodo API
+        api_url = f'https://zenodo.org/api/records/{record_id}'
+        response = _get(api_url, timeout=30)
+        response.raise_for_status()
+        record_data = response.json()
+
+        title = record_data.get('metadata', {}).get('title', '')
+        result['title'] = title
+        files = record_data.get('files', [])
+
+        # Save metadata
+        metadata = {
+            'record_id': record_id,
+            'title': title,
+            'doi': record_data.get('doi', ''),
+            'files': [
+                {'key': f.get('key', ''), 'size': f.get('size', 0)}
+                for f in files
+            ],
+        }
+        metadata_file = record_dir / 'metadata.json'
+        metadata_file.write_text(json.dumps(metadata, indent=2))
+        result['files'].append(str(metadata_file))
+
+        # Download files (skip PDF-only records if they're just supplementary notes)
+        data_files = [f for f in files if f.get('key', '').lower().endswith(('.h5ad', '.h5', '.mtx', '.csv', '.tsv', '.tar', '.gz', '.zip', '.loom', '.rds'))]
+        if not data_files:
+            # If no data files found, still download whatever is available (e.g. .pdf may contain data links)
+            data_files = files
+
+        for fobj in data_files[:20]:  # Cap at 20 files
+            file_url = fobj.get('links', {}).get('self', '')
+            raw_filename = fobj.get('key', '')
+            if not file_url or not raw_filename:
+                continue
+
+            # Sanitize: replace / with _ (Zenodo folders use / in keys)
+            filename = raw_filename.replace('/', '_').replace('\\', '_')
+            output_file = record_dir / filename
+            print(f'  Downloading Zenodo file: {filename} ({fobj.get("size", 0) / 1e6:.1f} MB)')
+            if _download_file(file_url, output_file, max_retries):
+                result['files'].append(str(output_file))
+
+        result['status'] = 'success' if len(result['files']) > 1 else 'partial'
+
+    except Exception as e:
+        result['status'] = 'failed'
+        result['errors'].append(str(e))
+        print(f"Error downloading from Zenodo {record_id}: {e}")
+
+    return result
+
+
 def _download_file(url: str, output_file: Path, max_retries: int = 3) -> bool:
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, timeout=120, stream=True)
+            response = _get(url, timeout=120, stream=True)
             response.raise_for_status()
             with output_file.open('wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):

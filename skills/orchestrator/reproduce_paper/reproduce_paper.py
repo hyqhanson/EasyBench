@@ -368,7 +368,7 @@ def discover_repositories(
 
     # 2. Metadata from llm_collector
     pmeta = paper_metadata or {}
-    for key in ('github_repos', 'arxiv_ids', 'zenodo_records'):
+    for key in ('github_repos', 'arxiv_ids', 'zenodo_records', 'zenodo_code', 'zenodo_data', 'figshare_links'):
         entries = pmeta.get(key, [])
         if isinstance(entries, str):
             entries = [entries]
