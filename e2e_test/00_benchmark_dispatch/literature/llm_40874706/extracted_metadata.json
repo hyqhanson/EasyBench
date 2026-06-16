@@ -1,0 +1,23 @@
+{
+  "title": "Identification of Biomarkers for Oxidative Stress in Age-Related Macular Degeneration: Combining Transcriptomics and Mendelian Randomization Analysis.",
+  "doi": "10.1167/tvst.14.8.42",
+  "source": "europe_pmc",
+  "id": "40874706",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "GSE29801",
+    "GSE135092"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 0,
+  "organism": "human",
+  "tissue": "retina",
+  "technology": "microarray",
+  "reason": "The paper does not present single-cell omics data; it reanalyzes bulk gene expression datasets (GSE29801, GSE135092) and validates with qRT-PCR. No multi-sample single-cell integration, no batch correction, and no code provided. Not suitable for single-cell data integration benchmarking.",
+  "methods_summary": "The study identified oxidative stress-related biomarkers for AMD by combining differential expression analysis on GEO datasets (GSE29801, GSE135092), machine learning feature selection, functional enrichment, immune cell infiltration analysis, Mendelian randomization, and qRT-PCR validation in a simulated AMD cell model."
+}

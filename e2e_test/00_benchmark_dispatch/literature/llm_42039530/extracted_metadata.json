@@ -1,0 +1,22 @@
+{
+  "title": "A Community Standard Multispecies Cell Atlas of the Basal Ganglia.",
+  "doi": "10.64898/2026.04.14.717814",
+  "source": "pubmed",
+  "id": "42039530",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Homo sapiens, Macaca mulatta, Callithrix jacchus, Mus musculus",
+  "tissue": "basal ganglia",
+  "technology": "single-cell transcriptomics, epigenomics, spatial genomics",
+  "reason": "Cross-species multimodal atlas of basal ganglia with multiple sequencing modalities and batch integration, highly relevant for integration benchmarks but no specific data accessions provided in this abstract.",
+  "methods_summary": "Large-scale single-cell transcriptomic classification integrated with epigenomic and spatial genomic modalities, cross-species sampling, harmonized analytical frameworks, community-informed annotation, and standardized nomenclature."
+}

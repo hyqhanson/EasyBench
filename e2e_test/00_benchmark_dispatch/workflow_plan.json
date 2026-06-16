@@ -1,0 +1,35 @@
+{
+  "benchmark_type": "integration",
+  "stages": [
+    {
+      "stage": "data_collection",
+      "description": "Collect multi-omics datasets"
+    },
+    {
+      "stage": "preprocessing",
+      "description": "Normalize and filter data"
+    },
+    {
+      "stage": "integration",
+      "description": "Apply integration methods (Seurat, Harmony, etc.)"
+    },
+    {
+      "stage": "evaluation",
+      "description": "Assess integration quality"
+    }
+  ],
+  "required_skills": [
+    "literature",
+    "data-download",
+    "sc-preprocessing",
+    "integration"
+  ],
+  "estimated_time": "2-4 hours",
+  "data_requirements": {
+    "datasets_found": 136,
+    "geo_datasets": 97,
+    "sra_datasets": 19,
+    "cellxgene_datasets": 0,
+    "accepted_papers_saved": 0
+  }
+}

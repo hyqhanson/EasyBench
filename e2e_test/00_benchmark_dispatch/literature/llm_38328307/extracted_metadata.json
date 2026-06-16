@@ -1,0 +1,24 @@
+{
+  "title": "Single-cell transcriptome profiling highlights the role of APP in blood vessels in assessing the risk of patients with proliferative diabetic retinopathy developing Alzheimer's disease.",
+  "doi": "10.3389/fcell.2023.1328979",
+  "source": "europe_pmc",
+  "id": "38328307",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "GSE165784",
+    "GSE163577",
+    "GSE160306"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 5,
+  "organism": "Homo sapiens, Mus musculus",
+  "tissue": "human fibrovascular membrane (FVM), human hippocampus vessels, human retina, mouse retina",
+  "technology": "scRNA-seq, snRNA-seq, bulk RNA-seq",
+  "reason": "Paper provides multi-sample scRNA-seq from PDR (2 subjects) and AD hippocampus (9 subjects) along with human retina bulk RNA-seq, suitable for cross-disease vascular studies. No custom code repository; data deposited in GEO. Moderate relevance for integration benchmarks as datasets are from different diseases and tissues with multiple samples.",
+  "methods_summary": "Seurat v4.3.0 for preprocessing, clustering, and normalization; GSEA (KEGG) for enrichment; CellChat v1.6.1 for cell-cell communication; Monocle for pseudotime trajectory analysis; correlation analysis with Spearman/Pearson methods."
+}

@@ -1,0 +1,27 @@
+{
+  "title": "An antagonistically pleiotropic gene regulates vertebrate growth, maturity, and lifespan",
+  "doi": "10.1038/s41467-026-72381-0",
+  "source": "springer_nature",
+  "id": "10.1038/s41467-026-72381-0",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE226279",
+    "GSE300596"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/Harel-lab/An-Antagonistically-Pleiotropic-Gene-Regulates-Vertebrate-Growth-Maturity-and-Lifespan"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [
+    "https://doi.org/10.5281/zenodo.19484387"
+  ],
+  "figshare_links": [],
+  "relevance_score": 5,
+  "organism": "Nothobranchius furzeri",
+  "tissue": "gonads (testis and ovary)",
+  "technology": "RNA-seq",
+  "reason": "Paper reports bulk RNA-seq data from vgll3 mutant and wildtype killifish at multiple time points, deposited in GEO (GSE226279, GSE300596). Also reanalyzes existing single-cell data from ref. 44. While the study involves multi-sample comparisons (e.g., mutant vs WT, different ages), the primary data is bulk RNA-seq, not scRNA-seq, and the analysis does not explicitly address batch correction or cross-dataset integration. However, the data could be used for integration with other killifish datasets if overlapping cell types are available.",
+  "methods_summary": "Genetic perturbation of vgll3 in killifish (Nothobranchius furzeri) via CRISPR; bulk RNA-seq transcriptomic profiling of gonads and other tissues; single-cell analysis of gonadal cell types from previously published data; smFISH and cellular assays."
+}

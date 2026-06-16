@@ -1,0 +1,24 @@
+{
+  "title": "Large-scale and innervated functional human gut tissues for transplantation via transient spheroid confinement",
+  "doi": "10.1038/s41551-026-01688-6",
+  "source": "springer_nature",
+  "id": "10.1038/s41551-026-01688-6",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "GSE233439"
+  ],
+  "sra_ids": [
+    "PRJEB84049"
+  ],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Homo sapiens",
+  "tissue": "small intestinal, colonic, gastric (gastrointestinal)",
+  "technology": "scRNA-seq, bulk RNA-seq, snRNA-seq",
+  "reason": "Biological discovery paper generating primary single-cell, bulk, and single-nucleus RNA-seq data from engineered human gut organoids (small intestinal, colonic, gastric) with an enteric nervous system. Data deposited in ENA (PRJEB84049) and GEO (GSE233439). Multiple modalities and likely multiple samples per condition make this suitable for integration benchmarks, though exact sample counts are not specified in the abstract or data availability section.",
+  "methods_summary": "Human pluripotent stem cells were differentiated into mid-hindgut spheroids, which were confined in a 3D-printed scaffolding tray to produce large-scale, innervated gut organoids. Transcriptomic profiling included single-cell RNA-seq, bulk RNA-seq, and single-nucleus RNA-seq to characterize cell types (epithelium, mesenchyme, neurons) and functional maturation. Data were compared with fetal gut reference datasets."
+}

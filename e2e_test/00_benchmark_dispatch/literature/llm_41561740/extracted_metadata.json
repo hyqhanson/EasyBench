@@ -1,0 +1,24 @@
+{
+  "title": "Downregulation of &lt;i&gt;OPCML&lt;/i&gt; is associated with activation of AKT signaling and aggressive phenotypes in glioblastoma cells.",
+  "doi": "10.3389/fonc.2025.1710073",
+  "source": "europe_pmc",
+  "id": "41561740",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "GSE16011",
+    "GSE116520",
+    "GSE84495"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 3,
+  "organism": "Homo sapiens",
+  "tissue": "glioblastoma (brain)",
+  "technology": "microarray, scRNA-seq",
+  "reason": "This biological discovery paper reanalyzes public bulk and single-cell RNA-seq data (GSE16011, GSE116520, GSE84495) without providing new sequencing data or a code repository. While it uses multiple datasets that could be relevant for integration benchmarks, the lack of deposited data in harmonized formats (e.g., h5ad) and absence of a code repository limit its immediate reusability. The paper does not describe multi-sample batch correction or provide processed data in a shareable format, reducing its benchmark utility.",
+  "methods_summary": "The study integrated two bulk microarray cohorts (GSE16011, GSE116520) and reanalyzed scRNA-seq data (GSE84495) to study OPCML expression in glioblastoma. Bulk differential expression used limma; scRNA-seq was processed with Seurat (QC: nFeature_RNA 200\u20136000, nCount_RNA 500\u201350000, percent.mt <10%), log-normalized, and clustered via PCA and UMAP. Survival analysis used TCGA data and Cox regression. Immune infiltration was estimated by ssGSEA and TIMER2 deconvolution. In vitro siRNA knockdown in U87 and U251 cells validated functional effects. No new sequencing data were generated."
+}

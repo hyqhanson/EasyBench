@@ -1,0 +1,27 @@
+{
+  "title": "The Prognostic Significance of TRs in Hepatocellular Carcinoma: Insights from TCGA and GEO Databases.",
+  "doi": "10.1177/11772719251315321",
+  "source": "europe_pmc",
+  "id": "39866810",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "GSE14520",
+    "GSE77314",
+    "GSE84005",
+    "GSE45436",
+    "GSE60502",
+    "GSE140228"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 2,
+  "organism": "Homo sapiens",
+  "tissue": "liver (hepatocellular carcinoma)",
+  "technology": "microarray, RNA-seq, scRNA-seq",
+  "reason": "Paper reanalyzes public bulk microarray and RNA-seq data for prognostic analysis; no new multi-batch scRNA-seq integration or code provided.",
+  "methods_summary": "Bulk microarray and RNA-seq expression analysis of THRA/THRB in HCC using TCGA and GEO databases, with scRNA-seq analysis of GSE140228 using Seurat. Functional assays on THRB overexpression in cell lines."
+}

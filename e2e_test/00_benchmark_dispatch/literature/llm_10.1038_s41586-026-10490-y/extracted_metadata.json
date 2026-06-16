@@ -1,0 +1,28 @@
+{
+  "title": "Lineage and organ signals sequentially build organ intrinsic nervous systems",
+  "doi": "10.1038/s41586-026-10490-y",
+  "source": "springer_nature",
+  "id": "10.1038/s41586-026-10490-y",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE322764",
+    "GSE322766",
+    "GSE149524",
+    "GSE165063",
+    "GSE101099"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/lezhanglab/Organ-Intrinsic-Nervous-Systems"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 8,
+  "organism": "Mus musculus",
+  "tissue": "heart, pancreas, intestine, lungs",
+  "technology": "10x Genomics scRNA-seq, 10x Visium spatial transcriptomics",
+  "reason": "Multi-organ single-cell and spatial transcriptomics data from mouse heart, pancreas, intestine, lungs; includes author-collected and reanalyzed public datasets; multiple batches/samples across organs; suitable for cross-tissue and cross-batch integration benchmarks.",
+  "methods_summary": "This study integrates lineage tracing, 3D imaging, single-cell transcriptomics (scRNA-seq) and 10x Visium spatial transcriptomics across mouse heart, pancreas, intestine and lungs to study organ intrinsic nervous system development. Data preprocessing and analysis methods are not detailed but code is available on GitHub."
+}

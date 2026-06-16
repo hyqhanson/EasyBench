@@ -1,0 +1,22 @@
+{
+  "title": "Intrahepatic Lymphangiogenesis Is Associated with Early Post-Hepatectomy Liver Regeneration, in Part via IL-6/STAT3 Signaling.",
+  "doi": "10.7150/ijms.106849",
+  "source": "europe_pmc",
+  "id": "41583514",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "GSE151309"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 6,
+  "organism": "Mus musculus",
+  "tissue": "liver",
+  "technology": "scRNA-seq",
+  "reason": "Paper reanalyzes public scRNA-seq data (GSE151309) from mouse liver after partial hepatectomy. Data includes 4 time points (POD0, POD1, POD2, POD4) and used Harmony for integration, making it suitable for benchmarking cross-dataset and batch correction methods. However, no new sequencing data generated and no code repositories provided.",
+  "methods_summary": "Single-cell RNA sequencing data from GEO (GSE151309) were analyzed using Seurat v5.0.3. UMI count tables loaded with Read10X. Cells filtered: nFeature RNA between 500/800 and 3000, mitochondrial percentage <30%. 15,949 cells retained. Harmony R package used for integration across 4 groups. Dimension reduction and clustering with Seurat."
+}

@@ -1,0 +1,22 @@
+{
+  "title": "Single-cell identifies and validates human circulating Treg subtype/state Treg^fci in non-small cell lung cancer",
+  "doi": "10.1038/s41392-026-02677-6",
+  "source": "springer_nature",
+  "id": "10.1038/s41392-026-02677-6",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Homo sapiens",
+  "tissue": "blood, lung (NSCLC tissue and para-tissue)",
+  "technology": "scRNA-seq, stereo-seq (spatial transcriptomics)",
+  "reason": "The paper presents newly generated scRNA-seq and stereo-seq data from multiple samples including pre/post-operative blood, NSCLC tissue, and multiple disease/organ datasets. The data are deposited in the Genome Sequence Archive (GSA) under accession HRA011677. The multi-sample, multi-batch design (pre- vs post-operative, multiple diseases, multiple organs) makes the data suitable for integration benchmarking, though batch correction is not explicitly discussed. No code repositories are provided, and data formats are not specified (presumably standard scRNA-seq formats like mtx or h5ad).",
+  "methods_summary": "scRNA-seq and stereo-seq were performed on peripheral blood and NSCLC tissue from patients, along with public datasets. A regional overlap-expression rate (rOER) system was developed to quantify T cell subtype specificity. Treg^fci subtype (FOXP3+CTLA4+IL2RA+) was identified and validated across spatial, temporal, and disease contexts. ETS1 was identified as a key regulator."
+}

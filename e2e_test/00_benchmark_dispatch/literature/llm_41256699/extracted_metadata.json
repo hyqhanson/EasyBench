@@ -1,0 +1,22 @@
+{
+  "title": "Latent plasticity of the human pancreas across development, health, and disease.",
+  "doi": "10.1101/2025.10.01.679230",
+  "source": "pubmed",
+  "id": "41256699",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 8,
+  "organism": "Human",
+  "tissue": "pancreas",
+  "technology": "sc/snRNA-seq, snATAC-seq, VASA-seq, spatial transcriptomics (Xenium), multiplexed proteomics (CODEX)",
+  "reason": "Multi-sample, multi-technology single-cell atlas of human pancreas across development and disease. 57 donors, multiple batches and technologies, suitable for cross-dataset integration and batch correction benchmarking.",
+  "methods_summary": "Integrated sc/snRNA-seq, snATAC-seq, VASA-seq, spatial transcriptomics (Xenium), and multiplexed proteomics (CODEX) from 57 donors across fetal development, adult homeostasis, and type 2 diabetes to generate a single-cell multiomics atlas of the human pancreas."
+}

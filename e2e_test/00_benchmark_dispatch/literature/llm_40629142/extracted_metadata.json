@@ -1,0 +1,22 @@
+{
+  "title": "Temporal control of progenitor competence shapes maturation in GABAergic neuron development in mice.",
+  "doi": "10.1038/s41593-025-01999-y",
+  "source": "europe_pmc",
+  "id": "40629142",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 8,
+  "organism": "Mus musculus (mouse)",
+  "tissue": "telencephalon (cortex, striatum, ganglionic eminence)",
+  "technology": "scRNA-seq, scATAC-seq, CUT&RUN, TrackerSeq, FlashTag, perturbation sequencing",
+  "reason": "Biological discovery paper with multi-sample, multi-batch scRNA-seq and scATAC-seq data from distinct developmental stages and experimental conditions (TrackerSeq, FlashTag). Data are suitable for benchmarking batch correction and integration methods as they involve multiple batches (embryos, stages, techniques) with overlapping cell types. The paper uses integration (Monocle3) and includes both transcriptomic and chromatin accessibility datasets. However, explicit data accessions (GEO, SRA) are not provided in the snippet, reducing immediate reusability. The web resource (mayerlab.net) offers interactive exploration but not raw downloads. Code availability is not stated. Score 8 reflects strong dataset relevance for integration benchmarks despite missing accession numbers.",
+  "methods_summary": "The authors collected single-cell transcriptomic and chromatin accessibility profiles from mouse embryonic forebrain (ganglionic eminence, cortex, striatum) at multiple developmental stages (e12.5, e14.5, e16.5). They used TrackerSeq (barcode lineage tracing) and FlashTag (birthdating) to label and track progenitors and progeny. scRNA-seq was performed on FACS-enriched tdTomato+ GABAergic neurons and CFSE-labeled cells. scATAC-seq and CUT&RUN were used for chromatin analysis. Integration of datasets was performed using Monocle3."
+}

@@ -1,0 +1,22 @@
+{
+  "title": "A multifaceted analysis of OTUD5 integrated MAVS in innate immunity of Primary Biliary Cholangitis.",
+  "doi": "10.1371/journal.pone.0342306",
+  "source": "europe_pmc",
+  "id": "41650163",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [
+    "https://doi.org/10.17632/ps7nn5sdy9.1"
+  ],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Homo sapiens",
+  "tissue": "peripheral blood, liver tissue",
+  "technology": "microarray, scRNA-seq, RT-qPCR, immunofluorescence",
+  "reason": "Provides new scRNA-seq data from PBMCs of PBC patients and controls, with BioProject accession PRJNA1289408 and Mendeley dataset. Suitable for integration studies focusing on immune cell subpopulations in autoimmune disease, though batch details and cell numbers not specified.",
+  "methods_summary": "scRNA-seq on PBMCs from PBC patients and healthy controls; microarray analysis of whole blood from GEO datasets; proteomic predictions using STRING and InBio Discover; validation by RT-qPCR and immunofluorescence."
+}

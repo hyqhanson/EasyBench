@@ -1,0 +1,25 @@
+{
+  "title": "Developmental chronology of mouse embryo from 2-cell stage through birth",
+  "doi": "10.1038/s41556-026-01971-3",
+  "source": "springer_nature",
+  "id": "10.1038/s41556-026-01971-3",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE186069",
+    "GSE228590"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/JiekaiLab/mdCLA"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 9,
+  "organism": "Mus musculus",
+  "tissue": "mouse embryo (multiple tissues)",
+  "technology": "10x Chromium v3",
+  "reason": "This paper presents a comprehensive single-cell atlas of mouse development from 2-cell stage to birth, covering 37 time points and 2.2 million cells. It includes raw sequence data (GSA CRA003171, CRA039992) and processed data (OMIX OMIX014646), plus code on GitHub. The multi-batch, multi-time-point design with overlapping cell types across stages makes it highly suitable for integration benchmarking. The authors also reanalyze public datasets (GSE186069, GSE228590, E-MTAB-6967) and demonstrate cross-dataset integration using Harmony.",
+  "methods_summary": "Single-cell RNA-seq using 10x Chromium v3 on fresh cells from 351 embryos across 37 time points (E1.5 to E19.0). Cells were dissected, dissociated, and sequenced with >90% viability. After quality control, 2,230,900 cells were annotated into 6 major groups and detailed subtypes using transcriptomic signatures and literature markers. Integration with external datasets was performed using the Harmony algorithm."
+}

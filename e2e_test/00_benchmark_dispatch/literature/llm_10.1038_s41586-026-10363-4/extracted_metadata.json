@@ -1,0 +1,28 @@
+{
+  "title": "Spatial atlas of diabetic kidney disease reveals a B cell-rich subgroup",
+  "doi": "10.1038/s41586-026-10363-4",
+  "source": "springer_nature",
+  "id": "10.1038/s41586-026-10363-4",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE115098"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/Woopsydaisy/Spatial-Human-Kidney-Map"
+  ],
+  "zenodo_data": [
+    "https://zenodo.org/records/15007208",
+    "https://zenodo.org/records/11468564",
+    "https://doi.org/10.5281/zenodo.18674907"
+  ],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 9,
+  "organism": "Homo sapiens",
+  "tissue": "kidney (diabetic kidney disease)",
+  "technology": "single-cell spatial transcriptomics (Xenium, CosMx), single-nucleus RNA sequencing",
+  "reason": "This paper presents a large-scale, multi-sample, multi-platform spatial and single-nucleus atlas of diabetic kidney disease, integrating data from over 200 patients across two spatial transcriptomics technologies (Xenium and CosMx) and snRNA-seq. The authors applied batch correction (scVI/scANVI) for data harmonization, making the dataset highly suitable for integration benchmark studies. The data includes multiple batches, overlapping cell types, and is publicly available in Zenodo repositories, while analysis code is on GitHub. This combination of scale, cross-platform integration, and open access makes it an excellent resource for evaluating single-cell integration methods.",
+  "methods_summary": "The authors built a spatial atlas of diabetic kidney disease using Xenium and CosMx single-cell spatial transcriptomics integrated with single-nucleus RNA sequencing. They defined tissue niches, identified a B cell-predominant immune microenvironment, and developed tissue and plasma biomarkers for patient stratification."
+}

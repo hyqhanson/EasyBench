@@ -1,0 +1,26 @@
+{
+  "title": "Ontogeny and transcriptional regulation of Thetis cells",
+  "doi": "10.1038/s41586-026-10198-z",
+  "source": "springer_nature",
+  "id": "10.1038/s41586-026-10198-z",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE316677",
+    "GSE174405",
+    "GSE294005"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/pty0111/TC-progenitor-2026"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Mus musculus",
+  "tissue": "fetal liver, mesenteric lymph nodes",
+  "technology": "scRNA-seq",
+  "reason": "This paper generated new scRNA-seq data from fetal liver and mesenteric lymph nodes at different developmental stages, providing multiple samples with overlapping cell types. The data is publicly available in GEO (GSE316677). It is suitable for benchmarking integration methods as it contains multiple batches (different tissues, ages, and conditions).",
+  "methods_summary": "The authors performed scRNA-seq on IL7R fate-mapped and ROR\u03b3t+ cells from fetal liver and early postnatal mesenteric lymph nodes. They used UMAP for visualization, CellRank for trajectory inference, and identified progenitor populations (TLP, TCP, LTiP) and Thetis cell subsets."
+}

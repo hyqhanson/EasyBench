@@ -1,0 +1,35 @@
+{
+  "title": "Human haematopoietic stem cells remember inflammatory stress",
+  "doi": "10.1038/s41586-026-10522-7",
+  "source": "springer_nature",
+  "id": "10.1038/s41586-026-10522-7",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE249479",
+    "GSE289435",
+    "GSE120221",
+    "GSE139369",
+    "GSE190067",
+    "GSE98600",
+    "GSE124220",
+    "GSE196990",
+    "GSE235646",
+    "GSE180298",
+    "GSE137864",
+    "GSE219015"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [
+    "https://zenodo.org/records/18850871"
+  ],
+  "figshare_links": [],
+  "relevance_score": 8,
+  "organism": "Homo sapiens",
+  "tissue": "haematopoietic stem cells (cord blood and bone marrow from xenografts)",
+  "technology": "10x Genomics scMultiome (scRNA-seq + scATAC-seq), scRNA-seq",
+  "reason": "This biological discovery paper presents newly generated single-cell multiome (RNA+ATAC) data from human HSCs under inflammation-recovery conditions in xenograft models, with multiple conditions (PBS, TNF, LPS) and biological replicates. The data includes multiple batches (xenograft pools, time points) requiring cross-sample integration. The study also reanalyses several public datasets for validation, providing a multi-dataset resource ideal for benchmarking batch correction and data harmonization methods.",
+  "methods_summary": "Developed xenograft inflammation-recovery models and performed single-cell multiomics (10x scMultiome) on human HSCs. Also standard scRNA-seq. Data includes CB HSCs and xenograft bone marrow samples. Comparison across conditions: PBS, TNF, LPS. Identified HSC inflammatory memory subset via NMF and multiomic integration."
+}

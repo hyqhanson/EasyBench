@@ -1,0 +1,22 @@
+{
+  "title": "Single cell atlas of canine natural killer cells identifies distinct circulating and tissue resident gene profiles.",
+  "doi": "10.3389/fimmu.2025.1571085",
+  "source": "pubmed",
+  "id": "40443661",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 9,
+  "organism": "Canis familiaris (dog) and Homo sapiens (human)",
+  "tissue": "blood, lung, liver, spleen, placenta",
+  "technology": "10X Chromium Single-Cell 3' v3.1",
+  "reason": "Multi-sample (9 canine tissues from multiple donors), multi-tissue, cross-species, with batch correction using Harmony, making it ideal for integration benchmarking.",
+  "methods_summary": "scRNA-seq of CD45+ cells from dog blood, lung, liver, spleen, placenta using 10X Genomics v3.1; CellRanger alignment to CanFam3.1; Seurat processing with Harmony integration, Monocle3 pseudotime."
+}

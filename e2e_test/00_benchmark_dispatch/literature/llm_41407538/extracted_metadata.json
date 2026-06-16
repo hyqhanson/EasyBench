@@ -1,0 +1,22 @@
+{
+  "title": "Single-cell transcriptome analyses reveal disturbed decidual microenvironment in women of advanced maternal age.",
+  "doi": "10.1002/ctm2.70541",
+  "source": "pubmed",
+  "id": "41407538",
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Homo sapiens",
+  "tissue": "decidua",
+  "technology": "scRNA-seq",
+  "reason": "This is a biological discovery paper that generated new scRNA-seq data from first-trimester decidua of women with advanced maternal age vs. controls. The study involves at least two sample groups (AMA vs. controlled reproductive age) and integrates multiple data types (histology, organoid modeling, scRNA-seq). While no specific accessions are provided in the abstract, the data were clearly collected by the authors and reflect multi-sample, multi-batch comparisons suitable for integration benchmarks. The score is high (7) because new primary data with overlapping cell types across conditions is valuable; lower than 10 due to lack of explicit batch-corrected analysis and missing accessions in the provided text.",
+  "methods_summary": "Integrated histology, organoid modelling, and high-resolution scRNA-seq of first-trimester decidua from women of advanced maternal age (AMA) and controlled reproductive age. The analysis uncovered pathological cellular states, aberrant differentiation pathways, immune dysfunction, and disrupted intercellular communication. Key findings include hyperactivated TGF-\u03b2 signaling driving fibrosis, PRR15 deficiency as a regulator of decidualization failure, and identification of a pro-fibrotic decidual microenvironment."
+}

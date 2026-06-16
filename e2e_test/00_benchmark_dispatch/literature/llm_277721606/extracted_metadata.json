@@ -1,0 +1,22 @@
+{
+  "title": "Pan-cancer human brain metastases atlas at single-cell resolution",
+  "doi": "10.1016/j.ccell.2025.03.025",
+  "source": "semantic_scholar",
+  "id": 277721606,
+  "acceptance": "DATA_ONLY",
+  "gse_ids": [
+    "INFERRED_DATA"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Homo sapiens",
+  "tissue": "brain metastases and primary tumors",
+  "technology": "single-cell RNA sequencing",
+  "reason": "Large multi-sample scRNA-seq atlas of brain metastases and primary tumors from 219 samples, suitable for integration benchmarking. Despite missing explicit dataset accessions in the provided text, the study is clearly original data collection with high potential for batch correction and multi-batch integration tasks.",
+  "methods_summary": "Integrative single-cell RNA sequencing analysis of 108 brain metastasis (BrM) samples and 111 primary tumor (PT) samples to investigate cell states, composition remodeling, and identification of five distinct BrM ecotypes."
+}

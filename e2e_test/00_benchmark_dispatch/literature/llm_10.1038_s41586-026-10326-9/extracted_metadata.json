@@ -1,0 +1,28 @@
+{
+  "title": "Multiomics and deep learning dissect regulatory syntax in human development",
+  "doi": "10.1038/s41586-026-10326-9",
+  "source": "springer_nature",
+  "id": "10.1038/s41586-026-10326-9",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [],
+  "sra_ids": [
+    "PRJNA1402391"
+  ],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/GreenleafLab/HDMA"
+  ],
+  "zenodo_data": [
+    "https://doi.org/10.5281/zenodo.17259745"
+  ],
+  "zenodo_code": [
+    "https://doi.org/10.5281/zenodo.17298234"
+  ],
+  "figshare_links": [],
+  "relevance_score": 10,
+  "organism": "Homo sapiens",
+  "tissue": "adrenal gland, brain, eye, heart, liver, lung, muscle, skin, spleen, stomach/oesophagus, and others",
+  "technology": "SHARE-seq",
+  "reason": "Biological discovery paper presenting a multi-organ, multi-modal single-cell atlas of human development. Provides matched chromatin accessibility and gene expression from 817,740 fetal cells across 12 organs, multiple time points, and 203 cell types. Raw sequencing data deposited to SRA (PRJNA1402391), processed data via Zenodo, and code on GitHub. Multiple batches/samples with overlapping cell types make it ideal for cross-dataset integration and batch correction benchmarking.",
+  "methods_summary": "SHARE-seq (split-and-pool combinatorial barcoding) was used to simultaneously profile chromatin accessibility (ATAC-seq) and gene expression (RNA-seq) from 817,740 fetal cells across 12 organs between post-conception weeks 10-23. Cell types annotated via iterative clustering using canonical markers and de novo marker genes. Deep learning models (ChromBPNet) trained to predict base-resolution accessibility from local DNA sequence. Data includes fragment files, count matrices, cell annotations, global caCRE annotations, motif lexicon, and genomic tracks."
+}

@@ -1,0 +1,25 @@
+{
+  "title": "Allele-specific CRISPR perturbation of the imprinted Dlk1\u2013Dio3 domain reveals regulation of BMP\u2013NOTCH\u2013VEGF signaling in embryonic organogenesis",
+  "doi": "10.1038/s41418-026-01757-y",
+  "source": "springer_nature",
+  "id": "10.1038/s41418-026-01757-y",
+  "acceptance": "FULLY_ACCEPTED",
+  "gse_ids": [
+    "GSE274171",
+    "GSE255900"
+  ],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/xjaixuexi/Dlk1-Dio3"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 7,
+  "organism": "Mus musculus",
+  "tissue": "liver, heart, placenta",
+  "technology": "scRNA-seq",
+  "reason": "Biological discovery paper with multiple conditions (HOMO, MK, PK, WT) and multiple organs (liver, heart, placenta) from E14.5 mouse embryos, suitable for multi-sample integration and batch correction benchmarking. ScRNA-seq data deposited in GEO (GSE274171, GSE255900) and custom analysis code on GitHub.",
+  "methods_summary": "Generated four mouse models via CRISPR/Cas9 insertion of a transcription termination cassette in the Dlk1-Dio3 domain. Performed scRNA-seq on E14.5 liver, heart, and placenta for each genotype. Integrated transcriptomic analyses to study allele-specific effects and signaling pathway dysregulation."
+}

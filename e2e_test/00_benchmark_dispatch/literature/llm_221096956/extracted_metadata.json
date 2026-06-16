@@ -1,0 +1,22 @@
+{
+  "title": "scREAD: A Single-Cell RNA-Seq Database for Alzheimer's Disease",
+  "doi": "10.1016/j.isci.2020.101769",
+  "source": "semantic_scholar",
+  "id": 221096956,
+  "acceptance": "CODE_ONLY",
+  "gse_ids": [],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "https://github.com/OSU-BMBL/scread/tree/master/script"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 3,
+  "organism": "Homo sapiens, Mus musculus",
+  "tissue": "brain (eight regions)",
+  "technology": "scRNA-Seq, snRNA-Seq",
+  "reason": "Paper describes scREAD database aggregating 55 existing scRNA-seq/snRNA-seq datasets from AD studies. No specific accession numbers provided; code repository available but data access is through the database portal. No new data generated, so low score for integration benchmark that requires explicit dataset IDs and batch information.",
+  "methods_summary": "The authors developed scREAD, a database that provides comprehensive analysis results for 55 single-cell/nucleus RNA-seq datasets from human AD postmortem brain and mouse models, including control atlas construction, cell type prediction, differential expression, and regulon identification."
+}

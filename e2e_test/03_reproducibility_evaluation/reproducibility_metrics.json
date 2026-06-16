@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "benchmark_type": "integration",
+      "repository_count": 0,
+      "repository_found": false,
+      "clone_success": false,
+      "install_success": false,
+      "run_success": false,
+      "reproducibility_score": null,
+      "failure_phase": "no_data",
+      "failure_details": [
+        "No reproduce data available for evaluation."
+      ],
+      "dataset_counts": {
+        "total": 0,
+        "types_present": 0
+      },
+      "method_sections_count": 0,
+      "code_snippets_count": 0,
+      "commands_count": 0,
+      "environment_file_count": 0,
+      "plan_steps_count": 0,
+      "baseline_metrics": [],
+      "computed_metrics": {},
+      "missing_baseline_metrics": [],
+      "metric_suggestions": []
+    }
+  ]
+}

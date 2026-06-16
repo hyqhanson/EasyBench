@@ -1,0 +1,22 @@
+{
+  "title": "Phosphoproteomics-based Profiling of Kinase Activities in Cancer Cells",
+  "doi": "10.1101/066019",
+  "source": "biorxiv",
+  "id": "10.1101/066019",
+  "acceptance": "CODE_ONLY",
+  "gse_ids": [],
+  "sra_ids": [],
+  "cellxgene_ids": [],
+  "github_repos": [
+    "http://github.com/saezlab/kinact/"
+  ],
+  "zenodo_data": [],
+  "zenodo_code": [],
+  "figshare_links": [],
+  "relevance_score": 1,
+  "organism": "",
+  "tissue": "",
+  "technology": "",
+  "reason": "This is a computational methods/protocol paper on phosphoproteomics kinase activity inference. It does not present new single-cell omics data, only describes tools and provides a GitHub repository. No dataset accessions or biological metadata are provided. Therefore it is not suitable for single-cell integration benchmarks.",
+  "methods_summary": "Discusses computational methods to predict kinase activity scores from MS-based phosphoproteomics data. Describes databases of kinase-substrate relationships and introduces KSEA, implemented in the kinact Python toolbox available on GitHub."
+}
