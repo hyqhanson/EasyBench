@@ -919,29 +919,45 @@ def _get_proxy_url() -> str:
     """Get university proxy URL securely.
 
     Priority:
-    1. ``UNIVERSITY_PROXY`` environment variable (for backward compatibility)
-    2. ``keyring``: retrieves password stored as
-       ``keyring.set_password('OmicsClaw.FudanProxy', '<username>', '<password>')``
+    1. ``UNIVERSITY_PROXY`` environment variable — full proxy URL
+       (e.g. ``http://user:pass@libproxy.fudan.edu.cn:8080``)
+    2. ``FUDAN_PROXY_USER`` + ``FUDAN_PROXY_PASSWORD`` environment variables
+    3. ``keyring``: retrieves password stored via the command
+       ``keyring set OmicsClaw.FudanProxy <username>`` (interactive)
 
     Returns empty string if no proxy is configured.
     """
-    # 1. Check env var (backward compat / Linux)
+    # 1. Check full proxy URL env var (backward compat)
     proxy = os.environ.get('UNIVERSITY_PROXY', '').strip()
     if proxy:
         return proxy
 
-    # 2. Try keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service)
-    _fudan_user = '24110720041'
-    try:
-        import keyring
-        pwd = keyring.get_password('OmicsClaw.FudanProxy', _fudan_user)
-        if pwd:
+    # 2. Try env vars: FUDAN_PROXY_USER + FUDAN_PROXY_PASSWORD
+    fudan_user = os.environ.get('FUDAN_PROXY_USER', '').strip()
+    if fudan_user:
+        fudan_pass = os.environ.get('FUDAN_PROXY_PASSWORD', '').strip()
+        if fudan_pass:
             from urllib.parse import quote
-            proxy = f'http://{quote(_fudan_user, safe="")}:{quote(pwd, safe="")}@libproxy.fudan.edu.cn:8080'
-            logger.debug('Loaded proxy credentials from keyring')
-            return proxy
-    except Exception:
-        pass
+            # Allow custom proxy host via FUDAN_PROXY_HOST
+            proxy_host = os.environ.get('FUDAN_PROXY_HOST', 'libproxy.fudan.edu.cn:8080').strip()
+            return f'http://{quote(fudan_user, safe="")}:{quote(fudan_pass, safe="")}@{proxy_host}'
+
+    # 3. Try keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service)
+    #    Only if FUDAN_PROXY_USER is set (otherwise we don't know the username)
+    if not fudan_user:
+        fudan_user = os.environ.get('FUDAN_PROXY_USER', '').strip()
+    if fudan_user:
+        try:
+            import keyring
+            pwd = keyring.get_password('OmicsClaw.FudanProxy', fudan_user)
+            if pwd:
+                from urllib.parse import quote
+                proxy_host = os.environ.get('FUDAN_PROXY_HOST', 'libproxy.fudan.edu.cn:8080').strip()
+                proxy = f'http://{quote(fudan_user, safe="")}:{quote(pwd, safe="")}@{proxy_host}'
+                logger.debug('Loaded proxy credentials from keyring')
+                return proxy
+        except Exception:
+            pass
 
     return ''
 
