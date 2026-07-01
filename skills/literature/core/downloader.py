@@ -16,13 +16,26 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def _get_session():
-    """Create a requests Session that bypasses the system proxy.
+    """Create a requests Session with optional proxy support.
 
-    System proxies (e.g. Clash, V2Ray) can interfere with NCBI/Zenodo
-    API calls.  Using ``trust_env=False`` routes requests directly.
+    Proxy priority (highest first):
+      1. EASYBENCH_PROXY env var (e.g. ``http://127.0.0.1:7890``)
+      2. EASYBENCH_SOCKS5_PROXY env var (e.g. ``socks5://127.0.0.1:7890``)
+      3. No proxy (direct connection, ``trust_env=False``)
+
+    Note: Setting an env var is the recommended approach to avoid
+    hardcoding proxy URLs in the codebase.
     """
+    import os as _os
     session = requests.Session()
-    session.trust_env = False
+    proxy = _os.environ.get('EASYBENCH_PROXY', '').strip()
+    socks = _os.environ.get('EASYBENCH_SOCKS5_PROXY', '').strip()
+    if proxy:
+        session.proxies = {'http': proxy, 'https': proxy}
+    elif socks:
+        session.proxies = {'http': socks, 'https': socks}
+    else:
+        session.trust_env = False
     return session
 
 
@@ -209,11 +222,16 @@ def download_supplementary_files(gse_id: str, output_dir: Path, max_retries: int
 
 
 def download_sra_dataset(sra_id: str, output_dir: Path, max_retries: int = 3, download_fastq: bool = False) -> Dict:
-    """Download metadata and candidate files for an SRA or BioProject accession.
+    """Download metadata and candidate data files for an SRA or BioProject accession.
 
     Supports:
       - SRA accessions (SRP, SRX, SRR, SRS)
       - BioProject IDs (PRJNA, PRJEB, PRJDB) — auto-resolved to SRA records
+
+    By default downloads metadata + any available supplementary files
+    (e.g. processed count matrices, .h5ad, .rds) from the SRA run selector
+    page.  Set *download_fastq=True* to also download raw .sra files
+    (huge — 10+ GB per run).
     """
     sra_id = sra_id.upper().strip()
     sra_dir = output_dir / sra_id
@@ -238,20 +256,66 @@ def download_sra_dataset(sra_id: str, output_dir: Path, max_retries: int = 3, do
         metadata_file.write_text(json.dumps(metadata, indent=2))
         result['files'].append(str(metadata_file))
 
+        # ── Download processed supplementary files (like GEO does) ──
+        runs = metadata.get('runs', [])
+        if runs:
+            # Try to download supplementary files from the first few runs
+            for run_acc in runs[:3]:
+                supp_files = _download_sra_supplementary(run_acc, sra_dir, max_retries)
+                if supp_files:
+                    result['files'].extend(supp_files)
+                    break  # Stop after the first successful run
+
+        # ── Optional: download raw FASTQ ──
         if download_fastq:
-            for run_accession in metadata.get('runs', [])[:5]:
+            for run_accession in runs[:5]:
                 file_url = _sra_accession_to_ftp_url(run_accession)
                 output_file = sra_dir / f"{run_accession}.sra"
                 if _download_file(file_url, output_file, max_retries):
                     result['files'].append(str(output_file))
 
-        result['status'] = 'success' if result['files'] else 'partial'
+        result['status'] = 'success' if len(result['files']) > 1 else (
+            'partial' if result['files'] else 'failed'
+        )
 
     except Exception as e:
         result['status'] = 'failed'
         result['errors'].append(str(e))
 
     return result
+
+
+def _download_sra_supplementary(run_acc: str, output_dir: Path, max_retries: int = 3) -> List[str]:
+    """Try to download processed data files from SRA run supplementary directory.
+
+    Many SRA runs have attached supplementary files (e.g. .h5ad, Seurat .rds,
+    count matrices) accessible via the NCBI SRA run selector FTP.
+    URL pattern: https://sra-download.ncbi.nlm.nih.gov/traces/sra/{prefix}/{run_acc}/
+    """
+    downloaded = []
+    prefix = run_acc[:3] + '/' + run_acc[:6]
+    try:
+        base_url = f"https://sra-download.ncbi.nlm.nih.gov/traces/sra/{prefix}/{run_acc}/"
+        session = _get_session()
+        resp = session.get(base_url, timeout=30)
+        if resp.status_code != 200:
+            return downloaded
+
+        # Parse NCBI directory listing
+        links = re.findall(r'href="([^"]+)"', resp.text)
+        for fname in links:
+            if fname in ('/', '..', 'Parent Directory') or fname.startswith('/'):
+                continue
+            # Skip raw SRA archives and FASTQ files (huge)
+            if fname.endswith('.sra') or fname.endswith('.fastq') or fname.endswith('.fastq.gz'):
+                continue
+            file_url = base_url + fname
+            out_file = output_dir / fname
+            if _download_file(file_url, out_file, max_retries):
+                downloaded.append(str(out_file))
+    except Exception:
+        pass
+    return downloaded
 
 
 def _is_bioproject_id(accession: str) -> bool:
@@ -522,8 +586,12 @@ def download_from_zenodo(zenodo_url: str, output_dir: Path, max_retries: int = 3
 
     zenodo_url = zenodo_url.strip()
 
-    # Extract record ID from various formats
-    record_match = _re.search(r'zenodo[./](\d+)', zenodo_url)
+    # Extract record ID from various formats:
+    #   - https://zenodo.org/records/15007208
+    #   - https://doi.org/10.5281/zenodo.18674907
+    #   - 17259745 (bare number)
+    record_match = (_re.search(r'zenodo\.org/records/(\d+)', zenodo_url) or
+                    _re.search(r'zenodo[.](\d+)', zenodo_url))
     if not record_match:
         # Try as a bare number
         if _re.match(r'^\d+$', zenodo_url):
@@ -620,3 +688,353 @@ def _download_file(url: str, output_file: Path, max_retries: int = 3) -> bool:
             else:
                 time.sleep(2 ** attempt)
     return False
+
+
+def clone_github_repo(repo_url: str, output_dir: Path, depth: int = 1, timeout: int = 300) -> Dict:
+    """Clone a GitHub repository to a local directory.
+
+    Skips if the directory already exists and is a git repo (idempotent).
+    If the URL is NOT a valid repo (e.g. an organisation homepage), returns
+    ``status='invalid_url'`` with the error reason.
+
+    Parameters
+    ----------
+    repo_url:
+        Full GitHub URL (e.g. ``https://github.com/user/repo``).
+    output_dir:
+        Local directory to clone into (parent). The repo will be cloned
+        into ``output_dir/{repo_name}/``.
+    depth:
+        ``--depth`` for shallow clone (default 1).
+    timeout:
+        Max seconds to wait for git clone.
+
+    Returns
+    -------
+    dict with ``repo_url``, ``status``, ``clone_path``, ``branch``, ``errors``.
+    """
+    repo_name = repo_url.rstrip('/').split('/')[-1]
+    if repo_name.endswith('.git'):
+        repo_name = repo_name[:-4]
+    clone_path = output_dir / repo_name
+
+    result = {
+        'repo_url': repo_url,
+        'source': 'github',
+        'status': 'pending',
+        'clone_path': str(clone_path),
+        'branch': '',
+        'errors': [],
+    }
+
+    # ── Pre-flight: verify the URL is an actual repo (not an org homepage) ──
+    # An org homepage like https://github.com/OrgName has no repo name after the org
+    parts = repo_url.rstrip('/').split('/')
+    if len(parts) < 5 or (len(parts) == 5 and parts[-1] == parts[-2]):
+        result['status'] = 'invalid_url'
+        msg = f"URL appears to be an organisation homepage, not a repo: {repo_url}"
+        result['errors'].append(msg)
+        print(f'    ⚠️  {msg}')
+        return result
+
+    try:
+        r = subprocess.run(
+            ['git', 'ls-remote', '--heads', repo_url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            stderr = (r.stderr or '').strip()
+            result['status'] = 'invalid_url'
+            result['errors'].append(f'git ls-remote failed: {stderr[:300]}')
+            print(f'    ⚠️  [{repo_name}] Not a valid git repo: {stderr[:200]}')
+            return result
+    except subprocess.TimeoutExpired:
+        result['status'] = 'failed'
+        result['errors'].append('git ls-remote timed out')
+        print(f'    ⚠️  [{repo_name}] git ls-remote timed out')
+        return result
+    except Exception as exc:
+        result['errors'].append(f'git ls-remote error: {exc}')
+        # Continue anyway — maybe it's a private repo
+
+    # ── Idempotent: if already cloned, just fetch ──
+    if (clone_path / '.git').exists():
+        try:
+            subprocess.run(
+                ['git', 'fetch', '--depth', str(depth), 'origin'],
+                cwd=str(clone_path), capture_output=True, timeout=min(timeout, 60),
+            )
+            br = subprocess.run(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                cwd=str(clone_path), capture_output=True, text=True, timeout=15,
+            )
+            result['branch'] = br.stdout.strip()
+            result['status'] = 'success'
+            return result
+        except Exception as exc:
+            result['errors'].append(f'fetch failed: {exc}')
+
+    # ── Fresh clone ──
+    cmd = ['git', 'clone', '--depth', str(depth), repo_url, str(clone_path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            stderr = (proc.stderr or '').strip()
+            result['status'] = 'failed'
+            result['errors'].append(f'git clone failed: {stderr[:300]}')
+            print(f'    ❌ [{repo_name}] Clone failed: {stderr[:200]}')
+            return result
+
+        # Get branch
+        br = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=str(clone_path), capture_output=True, text=True, timeout=15,
+        )
+        result['branch'] = br.stdout.strip()
+        result['status'] = 'success'
+    except subprocess.TimeoutExpired:
+        result['status'] = 'failed'
+        result['errors'].append('clone timed out')
+        print(f'    ❌ [{repo_name}] Clone timed out after {timeout}s')
+    except Exception as exc:
+        result['status'] = 'failed'
+        result['errors'].append(str(exc))
+        print(f'    ❌ [{repo_name}] Clone error: {exc}')
+
+    return result
+
+
+def download_generic_code(url: str, output_dir: Path) -> Dict:
+    """Download code from a generic URL (non-GitHub, non-Zenodo).
+
+    Handles URLs like ``keeper.mpdl.mpg.de``, ``figshare.com`` (non-DOI),
+    institutional repositories, and direct file downloads.
+    Saves to ``output_dir/code_{sanitized_name}/``.
+    """
+    import re as _re
+    url = url.strip()
+    sanitized = _re.sub(r'[^\w\-]+', '_', url.split('//')[-1].split('?')[0])[:40]
+    dest_dir = output_dir / f'code_{sanitized}'
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        'url': url,
+        'source': 'generic',
+        'status': 'pending',
+        'path': str(dest_dir),
+        'errors': [],
+    }
+
+    try:
+        resp = _get(url, timeout=60, stream=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get('Content-Type', '')
+
+        cd = resp.headers.get('Content-Disposition', '')
+        filename = None
+        if 'filename=' in cd:
+            import cgi
+            _, params = cgi.parse_header(cd)
+            filename = params.get('filename', None)
+        if not filename:
+            filename = url.rstrip('/').split('/')[-1].split('?')[0] or 'download'
+
+        out_file = dest_dir / filename
+        with out_file.open('wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        meta = {
+            'url': url,
+            'content_type': content_type,
+            'filename': filename,
+            'file_size': out_file.stat().st_size,
+        }
+        (dest_dir / 'download_info.json').write_text(json.dumps(meta, indent=2))
+        result['status'] = 'success'
+    except Exception as exc:
+        result['status'] = 'failed'
+        result['errors'].append(str(exc))
+        print(f'    ⚠️  Generic code download failed {url}: {exc}')
+
+    return result
+
+
+def unpack_data_files(data_root, unpack_root=None):
+    """Recursively extract all tar/zip archives under data_root.
+
+    Extracted contents go to ``unpack_root/`` (defaults to
+    ``data_root/../unpacked_data/``), preserving relative paths.
+
+    Returns ``{unpacked, failed, skipped, details: [...]}``.
+    """
+    import subprocess as _sp
+    from pathlib import Path as _P
+
+    if unpack_root is None:
+        unpack_root = _P(data_root).parent / 'unpacked_data'
+    unpack_root = _P(unpack_root)
+    unpack_root.mkdir(parents=True, exist_ok=True)
+
+    archives = []
+    for pattern in ('*.tar', '*.tar.gz', '*.tgz', '*.zip'):
+        archives.extend(list(_P(data_root).rglob(pattern)))
+    # Also collect single-file .gz (exclude .tar.gz/.tgz already picked above)
+    gz_files = []
+    for gz in _P(data_root).rglob('*.gz'):
+        if gz.name.endswith('.tar.gz') or gz.name.endswith('.tgz'):
+            continue
+        gz_files.append(gz)
+
+    summary = {'unpacked': 0, 'failed': 0, 'skipped': 0, 'details': []}
+
+    for arc in archives:
+        rel = arc.relative_to(data_root)
+        # Strip archive extension(s) for destination folder name
+        name = arc.name
+        for sfx in ('.tar.gz', '.tgz', '.tar', '.zip'):
+            if name.endswith(sfx):
+                name = name[:-len(sfx)]
+                break
+        dest = unpack_root / rel.parent
+
+        if dest.exists() and any(dest.iterdir()):
+            summary['skipped'] += 1
+            continue
+
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            if arc.suffix == '.zip':
+                _sp.run(
+                    ['powershell', '-Command',
+                     'Expand-Archive -Path ' + repr(str(arc)) +
+                     ' -DestinationPath ' + repr(str(dest)) + ' -Force'],
+                    capture_output=True, timeout=300, check=True,
+                )
+            else:
+                _sp.run(
+                    ['tar', '-xf', str(arc), '-C', str(dest)],
+                    capture_output=True, timeout=300, check=True,
+                )
+            print('  unpacked:', str(rel))
+            summary['unpacked'] += 1
+            summary['details'].append({
+                'file': str(rel), 'status': 'ok', 'dest': str(dest),
+            })
+        except Exception as exc:
+            print('  FAILED:', str(rel), '-', str(exc))
+            summary['failed'] += 1
+            summary['details'].append({
+                'file': str(rel), 'status': 'failed', 'error': str(exc),
+            })
+
+    # Decompress single .gz files (e.g., .txt.gz, .csv.gz, .mtx.gz)
+    for gz in gz_files:
+        rel = gz.relative_to(data_root)
+        out_name = gz.name[:-3]  # strip .gz
+        dest_file = unpack_root / rel.parent / out_name
+
+        if dest_file.exists() and dest_file.stat().st_size > 0:
+            summary['skipped'] += 1
+            continue
+
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import gzip as _gzip, shutil as _shutil
+            with _gzip.open(gz, 'rb') as f_in:
+                with open(dest_file, 'wb') as f_out:
+                    _shutil.copyfileobj(f_in, f_out)
+            print('  unpacked:', str(rel))
+            summary['unpacked'] += 1
+            summary['details'].append({
+                'file': str(rel), 'status': 'ok', 'dest': str(dest_file),
+            })
+        except Exception as exc:
+            print('  FAILED:', str(rel), '-', str(exc))
+            summary['failed'] += 1
+            summary['details'].append({
+                'file': str(rel), 'status': 'failed', 'error': str(exc),
+            })
+
+    # ── Recursive pass: unpacked dirs may contain *new* archives from tar extraction ──
+    # e.g. GSE285933_RAW.tar → GSE285933/GSM*.CEL.gz  (need another pass)
+    summary['sub_unpacked'] = 0
+    for entry in sorted(unpack_root.rglob('*')):
+        if not entry.is_file():
+            continue
+        ext = entry.suffix.lower()
+        if ext in ('.tar', '.zip') or entry.name.endswith('.tar.gz') or entry.name.endswith('.tgz'):
+            sub_result = unpack_data_files(unpack_root, unpack_root)
+            summary['sub_unpacked'] += sub_result.get('unpacked', 0)
+        elif ext == '.gz' and not entry.name.endswith('.tar.gz') and not entry.name.endswith('.tgz'):
+            # Already-compressed files inside unpacked dirs — decompress
+            out_name = entry.name[:-3]
+            dest_file = entry.parent / out_name
+            if dest_file.exists() and dest_file.stat().st_size > 0:
+                continue
+            try:
+                import gzip as _gz, shutil as _sh
+                with _gz.open(entry, 'rb') as f_in:
+                    out_tmp = entry.parent / ('._tmp_' + out_name)
+                    with open(out_tmp, 'wb') as f_out:
+                        _sh.copyfileobj(f_in, f_out)
+                    out_tmp.rename(dest_file)  # atomic
+                print(f'  unpacked (recursive): {entry.relative_to(unpack_root)}')
+                summary['unpacked'] += 1
+            except Exception as exc:
+                pass  # binary files fail silently
+
+    # ── Also copy non-compressed data files (rds, h5ad, tsv, csv, etc.) ──
+    # These already exist in data/ but not in unpacked_data/
+    data_root_p = _P(data_root)
+    for data_file in data_root_p.rglob('*'):
+        if not data_file.is_file():
+            continue
+        ext = data_file.suffix.lower()
+        # Skip compressed/archive files (already handled above)
+        if ext in ('.gz', '.zip', '.tar', '.tgz', '.bz2', '.xz'):
+            continue
+        # Skip hidden/temp files
+        if data_file.name.startswith('._') or data_file.name.startswith('.'):
+            continue
+        rel = data_file.relative_to(data_root_p)
+        dest = unpack_root / rel.parent / data_file.name
+        if dest.exists() and dest.stat().st_size > 0:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import shutil as _sh
+            _sh.copy2(data_file, dest)
+            print(f'  copied: {str(rel)}')
+            summary['copied'] = summary.get('copied', 0) + 1
+            summary['details'].append({
+                'file': str(rel), 'status': 'copied', 'dest': str(dest),
+            })
+        except Exception as exc:
+            print(f'  FAILED copy: {str(rel)} - {exc}')
+            summary['details'].append({
+                'file': str(rel), 'status': 'failed_copy', 'error': str(exc),
+            })
+
+    # ── Cleanup: remove decompressed .gz and .tar from unpacked_data ──
+    cleaned = 0
+    for entry in sorted(unpack_root.rglob('*')):
+        if not entry.is_file():
+            continue
+        name = entry.name.lower()
+        # Determine if this file has a decompressed counterpart
+        if name.endswith('.gz') and not name.endswith('.tar.gz'):
+            uncompressed = entry.parent / name[:-3]
+            if uncompressed.exists() and uncompressed.stat().st_size > 0:
+                entry.unlink()
+                cleaned += 1
+        elif any(name.endswith(sfx) for sfx in ('.tar', '.zip', '.tar.gz', '.tgz')):
+            # Check if the archive was extracted
+            extracted_dir = entry.parent / name.rsplit('.', 1)[0]
+            if extracted_dir.exists() and any(extracted_dir.iterdir()):
+                entry.unlink()
+                cleaned += 1
+    if cleaned:
+        print(f'  Cleaned up {cleaned} original compressed file(s) from unpacked_data')
+
+    return summary

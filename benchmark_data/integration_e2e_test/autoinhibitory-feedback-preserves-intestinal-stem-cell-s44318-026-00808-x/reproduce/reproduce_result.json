@@ -1,0 +1,65 @@
+{
+  "paper": "autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x",
+  "status": "success",
+  "scripts_completed": 2,
+  "total_scripts": 2,
+  "attempts": 1,
+  "max_attempts": 3,
+  "monitor_decision": {
+    "action": "CONTINUE",
+    "message": "normal progress",
+    "details": {}
+  },
+  "output": "e support but running in an English locale\r\n\r\nR is a collaborative project with many contributors.\r\nType 'contributors()' for more information and\r\n'citation()' on how to cite R or R packages in publications.\r\n\r\nType 'demo()' for some demos, 'help()' for on-line help, or\r\n'help.start()' for an HTML browser interface to help.\r\nType 'q()' to quit R.\r\n\r\n> setwd('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD'); if(!dir.exists('output')) dir.create('output'); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE)); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE));  knitr::knit('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD/MELD_preprocessing.Rmd', output='D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_preprocessing.md')\r\n1/13                  \r\n2/13 [load libraries] \r\n3/13                  \r\n4/13 [unnamed-chunk-1]\r\n5/13                  \r\n6/13 [unnamed-chunk-2]\r\n7/13                  \r\n8/13 [unnamed-chunk-3]\r\n9/13                  \r\n10/13 [unnamed-chunk-4]\r\n11/13                  \r\n12/13 [unnamed-chunk-5]\r\n13/13                  \r\n[1] \"D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_preprocessing.md\"\r\n> \r\n\n\r\n\r\nprocessing file: D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD/MELD_preprocessing.Rmd\r\noutput file: D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_preprocessing.md\r\n\r\n\n=== scRNAseq/analyses/10_MELD/MELD_evaluation.Rmd ===\n\r\nR version 4.5.2 (2025-10-31 ucrt) -- \"[Not] Part in a Rumble\"\r\nCopyright (C) 2025 The R Foundation for Statistical Computing\r\nPlatform: x86_64-w64-mingw32/x64\r\n\r\nR is free software and comes with ABSOLUTELY NO WARRANTY.\r\nYou are welcome to redistribute it under certain conditions.\r\nType 'license()' or 'licence()' for distribution details.\r\n\r\n  Natural language support but running in an English locale\r\n\r\nR is a collaborative project with many contributors.\r\nType 'contributors()' for more information and\r\n'citation()' on how to cite R or R packages in publications.\r\n\r\nType 'demo()' for some demos, 'help()' for on-line help, or\r\n'help.start()' for an HTML browser interface to help.\r\nType 'q()' to quit R.\r\n\r\n> setwd('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD'); if(!dir.exists('output')) dir.create('output'); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE)); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE));  knitr::knit('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD/MELD_evaluation.Rmd', output='D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_evaluation.md')\r\n1/7                  \r\n2/7 [load libraries] \r\n3/7                  \r\n4/7 [unnamed-chunk-1]\r\n5/7                  \r\n6/7 [unnamed-chunk-2]\r\n7/7                  \r\n[1] \"D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_evaluation.md\"\r\n> \r\n\n\r\n\r\nprocessing file: D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD/MELD_evaluation.Rmd\r\noutput file: D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_evaluation.md\r\n\r\n",
+  "fix_attempts": [],
+  "entry_scripts": [
+    "scRNAseq/analyses/10_MELD/MELD_preprocessing.Rmd",
+    "scRNAseq/analyses/10_MELD/MELD_evaluation.Rmd"
+  ],
+  "env_guess": {
+    "python": "3.9+ (needed for MELD Python package; will be called via reticulate in R)",
+    "R": "4.2+",
+    "key_packages": [
+      "Seurat",
+      "SeuratDisk",
+      "MELD (Python)",
+      "reticulate",
+      "Matrix",
+      "ggplot2",
+      "dplyr",
+      "tidyverse",
+      "rmarkdown"
+    ]
+  },
+  "reproducibility": {
+    "score": 30,
+    "breakdown": {
+      "scripts_execution": 10,
+      "data_quality": 5,
+      "package_availability": 25,
+      "output_completeness": 0
+    },
+    "gaps": [
+      {
+        "category": "file_paths",
+        "severity": "critical",
+        "message": "Cannot open compressed file at expected path: 'D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/output/Ctrl_NotchKO_integrated_scent.rds'",
+        "fix_hint": "Ensure the required data files are present at the expected location or update file paths in the script."
+      },
+      {
+        "category": "output_completeness",
+        "severity": "high",
+        "message": "No output files were produced despite scripts executing.",
+        "fix_hint": "Investigate script errors and ensure all dependencies and data are correctly set up to generate outputs."
+      }
+    ],
+    "summary": "Scripts executed but with critical file path errors and missing data, resulting in no outputs generated.",
+    "needs_improvement": true,
+    "method": "agent_evaluator"
+  },
+  "extracted_metrics": {
+    "n_degs": 3
+  },
+  "missing_packages": [],
+  "output_files": []
+}

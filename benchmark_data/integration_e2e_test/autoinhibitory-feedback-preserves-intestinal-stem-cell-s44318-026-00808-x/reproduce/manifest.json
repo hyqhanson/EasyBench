@@ -1,0 +1,24 @@
+{
+  "paper": "autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x",
+  "benchmark_type": "integration",
+  "reproduced_at": "2026-07-01T23:59:09.131793",
+  "scripts": [
+    {
+      "script_name": "scRNAseq/analyses/10_MELD/MELD_preprocessing.Rmd",
+      "source_path": "scRNAseq\\analyses\\10_MELD\\MELD_preprocessing.Rmd",
+      "language": "R",
+      "purpose": "Preprocess integrated Seurat object (normalize, cluster, compute UMAP) to prepare input for MELD analysis.",
+      "command": "R -e setwd('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD'); if(!dir.exists('output')) dir.create('output'); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE)); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE));  knitr::knit('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD/MELD_preprocessing.Rmd', output='D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_preprocessing.md') ..."
+    },
+    {
+      "script_name": "scRNAseq/analyses/10_MELD/MELD_evaluation.Rmd",
+      "source_path": "scRNAseq\\analyses\\10_MELD\\MELD_evaluation.Rmd",
+      "language": "R",
+      "purpose": "Run MELD perturbation detection, plot likelihoods, and evaluate DEGs from perturbation labels.",
+      "command": "R -e setwd('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD'); if(!dir.exists('output')) dir.create('output'); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE)); invisible(file.copy(Sys.glob(file.path('D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/unpacked_data', '*', '*', '*.rds')), 'output/', overwrite=TRUE, copy.mode=FALSE));  knitr::knit('D:/HYQ/EasyBench/benchmark_code/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/Supp_Redhai_Hirschmueller_2024/scRNAseq/analyses/10_MELD/MELD_evaluation.Rmd', output='D:/HYQ/EasyBench/benchmark_data/integration_e2e_test/autoinhibitory-feedback-preserves-intestinal-stem-cell-s44318-026-00808-x/reproduce/MELD_evaluation.md') ..."
+    }
+  ],
+  "exit_code": 0,
+  "scripts_completed": 2,
+  "total_scripts": 2
+}
