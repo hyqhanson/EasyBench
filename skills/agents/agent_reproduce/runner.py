@@ -63,10 +63,11 @@ def run_agent_reproduce(
     reproduce_dir.mkdir(exist_ok=True)
 
     # Write a manifest.json recording what we're reproducing
+    now_ts = __import__("datetime").datetime.now().isoformat()
     manifest = {
         "paper": paper_slug,
         "benchmark_type": benchmark_type,
-        "reproduced_at": __import__("datetime").datetime.now().isoformat(),
+        "reproduced_at": now_ts,
         "scripts": [],
     }
 
@@ -75,7 +76,7 @@ def run_agent_reproduce(
         return {"paper": paper_slug, "status": "no_code_repo",
                 "message": f"no repo dir under {code_dir}"}
 
-    # Run each script in sequence
+    # Group scripts by repo_dir for stitched execution
     fixer = AgentFix(paper_slug, paper_dir)
     all_output = ""
     consecutive_errors = 0
@@ -83,97 +84,123 @@ def run_agent_reproduce(
     returncode = 0
     total_scripts = len(target_scripts)
 
-    for script_idx, target in enumerate(target_scripts):
-        script_name = target["script_name"]
-        print(f"\n  === Script {script_idx+1}/{total_scripts}: {script_name} ===")
+    # Stitch: run all Rmd scripts sharing the same repo_dir in one R session
+    rmd_targets = [t for t in target_scripts if Path(t["script_name"]).suffix.lower() in ('.rmd', '.rmarkdown')]
 
-        script_path = _find_script_file(script_name, repo_dir)
-        if not script_path:
-            print(f"  [SKIP] script not found: {script_name}")
-            continue
+    if len(rmd_targets) >= 2:
+        # Check if all Rmd scripts live under the same repo_dir / parent subdirectory
+        # Use the actual script paths to determine shared context
+        rmd_paths = [_find_script_file(t["script_name"], repo_dir) for t in rmd_targets]
+        rmd_paths = [p for p in rmd_paths if p]
+        if rmd_paths:
+            # All scripts share the same parent dir => stitch is safe
+            parents = {p.parent.resolve() for p in rmd_paths}
+            if len(parents) <= 2:  # same dir or one level of nesting
+                # Same-repo Rmds -> stitch into one R session
+                print(f"\n  === Stitched run: {len(rmd_targets)} Rmd scripts in one R session ===")
+                scripts_completed, stitch_ret, stitch_out = _run_stitched_rmds(
+                    rmd_targets, repo_dir, reproduce_dir, paper_dir / "unpacked_data",
+                    paper_slug, max_fix_attempts, fixer
+                )
+                # Use the first Rmd's paths for manifest entries
+                for t in rmd_targets:
+                    script_path = _find_script_file(t["script_name"], repo_dir)
+                    if script_path:
+                        manifest["scripts"].append({
+                            "script_name": t["script_name"],
+                            "source_path": str(script_path.relative_to(repo_dir)),
+                            "language": "R (stitched)",
+                            "purpose": t.get("purpose", ""),
+                            "command": f"stitched with {len(rmd_targets)} Rmds",
+                        })
+                all_output += stitch_out
+                final_decision = analyze_log(stitch_out, consecutive_errors)
+                consecutive_errors = 0
+                returncode = stitch_ret
+                script_idx = scripts_completed - 1
+                attempt = 1  # stitched runs use 1 attempt internally
+    else:
+        # Fallback: run each script individually (single-Rmd or non-Rmd)
+        for script_idx, target in enumerate(target_scripts):
+            script_name = target["script_name"]
+            print(f"\n  === Script {script_idx+1}/{total_scripts}: {script_name} ===")
 
-        print(f"  Source: {script_path.relative_to(repo_dir)}")
-        print(f"  Outputs -> reproduce/")
+            script_path = _find_script_file(script_name, repo_dir)
+            if not script_path:
+                print(f"  [SKIP] script not found: {script_name}")
+                continue
 
-        # Build command to run the script in its original location,
-        # with outputs redirected to reproduce/
-        cmd = _build_command_for_script(script_path, reproduce_dir, repo_dir,
-                                         data_dir=paper_dir / "unpacked_data")
+            print(f"  Source: {script_path.relative_to(repo_dir)}")
+            print(f"  Outputs -> reproduce/")
 
-        if not cmd:
-            print(f"  [SKIP] unsupported script type: {script_name}")
-            continue
+            cmd = _build_command_for_script(script_path, reproduce_dir, repo_dir,
+                                             data_dir=paper_dir / "unpacked_data")
 
-        manifest["scripts"].append({
-            "script_name": script_name,
-            "source_path": str(script_path.relative_to(repo_dir)),
-            "language": target.get("language", "unknown"),
-            "purpose": target.get("purpose", ""),
-            "command": " ".join(cmd[:3]) + " ...",
-        })
+            if not cmd:
+                print(f"  [SKIP] unsupported script type: {script_name}")
+                continue
 
-        print(f"  Command: {' '.join(cmd[:3])} ...")
+            manifest["scripts"].append({
+                "script_name": script_name,
+                "source_path": str(script_path.relative_to(repo_dir)),
+                "language": target.get("language", "unknown"),
+                "purpose": target.get("purpose", ""),
+                "command": " ".join(cmd[:3]) + " ...",
+            })
 
-        # Run with Monitor loop
+            print(f"  Command: {' '.join(cmd[:3])} ...")
 
-        # Run with Monitor loop
-        for attempt in range(1, max_fix_attempts + 1):
-            print(f"  [Attempt {attempt}/{max_fix_attempts}] {paper_slug[:40]}")
+            for attempt in range(1, max_fix_attempts + 1):
+                print(f"  [Attempt {attempt}/{max_fix_attempts}] {paper_slug[:40]}")
 
-            stdout, stderr, returncode = _run_command(cmd, reproduce_dir)
-            output = stdout + "\n" + stderr
-            all_output += f"\n=== {script_name} ===\n{output}"
+                stdout, stderr, returncode = _run_command(cmd, reproduce_dir)
+                output = stdout + "\n" + stderr
+                all_output += f"\n=== {script_name} ===\n{output}"
 
-            result = analyze_log(output, consecutive_errors)
-            final_decision = result
+                result = analyze_log(output, consecutive_errors)
+                final_decision = result
 
-            if returncode == 0:
-                # Check output for hidden errors (R/knitr may return 0 even on error)
-                has_hidden_error = any(p in output.lower() for p in [
-                    "error in library", "there is no package",
-                    "cannot open the connection", "error in file",
-                    "error in source", "error in h()",
-                ])
-                if has_hidden_error:
-                    print(f"  [WARN] Hidden error in output, triggering fix...")
-                    # Treat as FALLBACK: run fix + retry
+                if returncode == 0:
+                    output_lower = output.lower()
+                    has_hidden_error = _has_hidden_r_error(output_lower)
+                    if has_hidden_error:
+                        print(f"  [WARN] Hidden error in output, triggering fix...")
+                        fix_result = fixer.diagnose_and_fix(output, reproduce_dir)
+                        if fix_result.get("fixed") and attempt < max_fix_attempts:
+                            fix_cmds = fix_result.get("commands_run", [])
+                            for fix_cmd in fix_cmds:
+                                import subprocess as _sp
+                                _sp.run(fix_cmd, shell=True, capture_output=True,
+                                        text=False, timeout=300)
+                            print(f"  [RETRY after fix] Attempt {attempt+1}")
+                            continue
+                    print(f"  [OK] {script_name} completed")
+                    consecutive_errors = 0
+                    break
+
+                if result["action"] == "CONTINUE":
+                    consecutive_errors = 0
+                elif result["action"] in ("RETRY", "WARN"):
+                    consecutive_errors += 1
+                    if attempt < max_fix_attempts:
+                        print(f"  [RETRY] {result.get('message', '')}")
+                        continue
+                elif result["action"] == "FALLBACK":
                     fix_result = fixer.diagnose_and_fix(output, reproduce_dir)
                     if fix_result.get("fixed") and attempt < max_fix_attempts:
                         fix_cmds = fix_result.get("commands_run", [])
                         for fix_cmd in fix_cmds:
+                            print(f"  [FIX] {fix_cmd[:80]}...")
                             import subprocess as _sp
-                            _sp.run(fix_cmd, shell=True, capture_output=True,
-                                    text=False, timeout=300)
+                            _sp.run(fix_cmd, shell=True, capture_output=True, text=False,
+                                    timeout=300)
                         print(f"  [RETRY after fix] Attempt {attempt+1}")
                         continue
-                print(f"  [OK] {script_name} completed")
-                consecutive_errors = 0
-                break
+                elif result["action"] == "ABORT":
+                    break
 
-            if result["action"] == "CONTINUE":
-                consecutive_errors = 0
-            elif result["action"] in ("RETRY", "WARN"):
-                consecutive_errors += 1
-                if attempt < max_fix_attempts:
-                    print(f"  [RETRY] {result.get('message', '')}")
-                    continue
-            elif result["action"] == "FALLBACK":
-                fix_result = fixer.diagnose_and_fix(output, reproduce_dir)
-                if fix_result.get("fixed") and attempt < max_fix_attempts:
-                    # Execute the fix command before retrying
-                    fix_cmds = fix_result.get("commands_run", [])
-                    for fix_cmd in fix_cmds:
-                        print(f"  [FIX] {fix_cmd[:80]}...")
-                        import subprocess as _sp
-                        _sp.run(fix_cmd, shell=True, capture_output=True, text=False,
-                                timeout=300)
-                    print(f"  [RETRY after fix] Attempt {attempt+1}")
-                    continue
-            elif result["action"] == "ABORT":
-                break
-
-        if returncode != 0:
-            break  # stop pipeline on failure
+            if returncode != 0:
+                break  # stop pipeline on failure
 
     # Save manifest
     manifest["exit_code"] = returncode
@@ -285,6 +312,159 @@ def _find_script_file(script_name: str, repo_dir: Path) -> Optional[Path]:
     return None
 
 
+def _build_data_prefix(data_dir: Path, repo_dir: Path) -> str:
+    """Build R code prefix that links data files into repo_root/output/."""
+    repo_root = str(repo_dir.resolve()).replace('\\', '/')
+    data_src = str(data_dir.resolve()).replace('\\', '/')
+
+    # Discover all subdirectory paths under output/ needed by scripts
+    # Scan repo for patterns like fwrite(here("output", "MELD", ...)) or readRDS(here("output", "subdir", ...))
+    subdirs = set()
+    for rmd in repo_dir.rglob("*.Rmd"):
+        text = rmd.read_text(encoding="utf-8", errors="replace")
+        for m in __import__("re").findall(r'here\(\s*["\']output["\']\s*,\s*["\'](\w+)["\']', text):
+            subdirs.add(m)
+
+    mkdir_cmds = ""
+    for sd in sorted(subdirs):
+        mkdir_cmds += "if(!dir.exists('%s/output/%s')) dir.create('%s/output/%s',showWarnings=F,recursive=T); " % (
+            repo_root, sd, repo_root, sd)
+
+    return (
+        "if(!dir.exists('%s/output')) dir.create('%s/output',showWarnings=F); "
+        "%s"
+        # Copy .rds files into repo_root/output/
+        "invisible(file.copy(list.files('%s', pattern='\\\\.rds$', "
+        "full.names=T, recursive=T, include.dirs=F), "
+        "'%s/output/', overwrite=T, copy.mode=F)); "
+        # Recursive copy of everything from data_dir into repo_root/
+        "invisible(file.copy(list.files('%s', "
+        "full.names=T, recursive=T, include.dirs=T), "
+        "'%s/', overwrite=T, copy.mode=F, recursive=T))"
+        % (repo_root, repo_root, mkdir_cmds,
+           data_src, repo_root,
+           data_src, repo_root)
+    )
+
+
+def _run_stitched_rmds(
+    rmd_targets: List[Dict[str, Any]],
+    repo_dir: Path,
+    reproduce_dir: Path,
+    data_dir: Path,
+    paper_slug: str,
+    max_fix_attempts: int,
+    fixer: Any,
+) -> Tuple[int, int, str]:
+    """Run multiple Rmd scripts in a single R session (stitched).
+
+    Generates a temporary R script that knits each Rmd sequentially,
+    so intermediate files (TSV, RDS) from the first Rmd are available
+    to subsequent ones.
+
+    Returns: (scripts_completed, returncode, combined_output)
+    """
+    # Resolve all script paths
+    script_infos = []
+    for t in rmd_targets:
+        sp = _find_script_file(t["script_name"], repo_dir)
+        if sp:
+            script_infos.append((t, sp))
+
+    if not script_infos:
+        return 0, 0, ""
+
+    # Build the stitched R script content
+    data_prefix = _build_data_prefix(data_dir, repo_dir) if data_dir and data_dir.exists() else ""
+    stitched_lines = [
+        data_prefix,
+        'library(knitr)',
+    ]
+
+    for idx, (target, sp) in enumerate(script_infos):
+        wp = str(sp.resolve()).replace('\\', '/')
+        wd = str(sp.parent.resolve()).replace('\\', '/')
+        out_md = str((reproduce_dir / (sp.stem + ".md")).resolve()).replace('\\', '/')
+        stitched_lines.append(
+            'tryCatch({'
+            '  owd <- setwd("%s");'
+            '  cat("\\n===== STITCHED SCRIPT %d/%d: %s =====\\n");'
+            '  knit("%s", output="%s");'
+            '  setwd(owd);'
+            '  cat("\\n===== END SCRIPT %d =====\\n")'
+            '}, error=function(e) {'
+            '  cat("\\n===== STITCHED SCRIPT %d ERROR:", conditionMessage(e), "=====\\n")'
+            '})'
+            % (wd, idx + 1, len(script_infos), sp.name, wp, out_md,
+               idx + 1, idx + 1)
+        )
+
+    stitch_script = reproduce_dir / "_stitched_reproduce.R"
+    stitch_script.write_text("\n".join(stitched_lines) + "\n", encoding="utf-8")
+    wp_script = str(stitch_script.resolve()).replace('\\', '/')
+    cmd = ["R", "-e", "source('%s')" % wp_script]
+
+    # Run with Monitor loop
+    all_output = ""
+    scripts_ok = 0
+    for attempt in range(1, max_fix_attempts + 1):
+        print(f"  [Stitched Attempt {attempt}/{max_fix_attempts}]")
+        stdout, stderr, returncode = _run_command(cmd, reproduce_dir)
+        output = stdout + "\n" + stderr
+        all_output += output
+
+        output_lower = output.lower()
+        has_hidden = _has_hidden_r_error(output_lower)
+
+        if returncode == 0 and not has_hidden:
+            scripts_ok = len(script_infos)
+            print(f"  [OK] All {len(script_infos)} scripts completed in stitched session")
+            return scripts_ok, 0, all_output
+
+        if has_hidden:
+            print(f"  [WARN] Hidden error in stitched output, triggering fix...")
+            fix_result = fixer.diagnose_and_fix(output, reproduce_dir)
+            if fix_result.get("fixed") and attempt < max_fix_attempts:
+                fix_cmds = fix_result.get("commands_run", [])
+                for fix_cmd in fix_cmds:
+                    import subprocess as _sp
+                    _sp.run(fix_cmd, shell=True, capture_output=True, text=False, timeout=300)
+                continue
+
+        if attempt < max_fix_attempts:
+            # Retry if there's a network or transient error
+            if any(p in output_lower for p in ["timeout", "internet", "connection"]):
+                print(f"  [RETRY] Transient error, attempt {attempt+1}")
+                continue
+
+        # Some scripts may have succeeded before the error
+        scripts_ok = max(0, sum(1 for s in script_infos
+                                if ("===== END SCRIPT" in output and
+                                    s[1].stem in output.split("===== END SCRIPT")[0])))
+        return scripts_ok, returncode, all_output
+
+    return scripts_ok, -1, all_output
+
+
+def _has_hidden_r_error(output_lower: str) -> bool:
+    """Check if knitr/R output contains hidden errors despite exit code 0."""
+    patterns = [
+        "error in library", "there is no package",
+        "cannot open the connection", "error in file",
+        "error in source", "error in h()",
+        "error in `fwrite()`",
+        "error in `data.table::fread()`",
+        "object '" , "' not found",
+        "no such file or directory",
+        "can't select columns that don't exist",
+        "column `", "` doesn't exist",
+        "error in evaluating the argument",
+        "is not readable",
+        "cannot open the connection",
+    ]
+    return any(p in output_lower for p in patterns)
+
+
 def _prepare_script_in_reproduce(script_path: Path, reproduce_dir: Path) -> Path:
     """Copy script to reproduce dir so outputs are isolated from original code."""
     rel = script_path.name  # same filename, in reproduce dir
@@ -319,26 +499,14 @@ def _build_command_for_script(
         wd = str(script_path.parent.resolve()).replace('\\', '/')
         out_md = str((reproduce_dir / (script_path.stem + ".md")).resolve()).replace('\\', '/')
 
-        # Build a data-linking prefix: if data_dir has files, copy them
-        # into the script's working directory (e.g., output/ subfolder)
-        data_prefix = ""
-        if data_dir and data_dir.exists():
-            # Find the most relevant data files (rds, h5ad, etc.)
-            data_files = []
-            for ext in ('*.rds', '*.h5ad', '*.mtx', '*.tsv', '*.csv'):
-                data_files.extend(data_dir.rglob(ext))
-            if data_files:
-                # Create output/ in working directory and copy files
-                data_src = str(data_dir.resolve()).replace('\\', '/')
-                data_prefix = (
-                    "if(!dir.exists('output')) dir.create('output'); "
-                    "invisible(file.copy(Sys.glob(file.path('%s', '*', '*.rds')), "
-                    "'output/', overwrite=TRUE, copy.mode=FALSE)); "
-                    "invisible(file.copy(Sys.glob(file.path('%s', '*', '*', '*.rds')), "
-                    "'output/', overwrite=TRUE, copy.mode=FALSE)); " % (data_src, data_src)
-                )
+        # Build a data-linking prefix: copy data files into repo_root/output/
+        # Uses _build_data_prefix which dynamically discovers required subdirs
+        # from all Rmd files in the repo (no hardcoded paths).
+        data_prefix = _build_data_prefix(data_dir, repo_dir) if data_dir and data_dir.exists() and repo_dir else ""
+        if not data_prefix:
+            data_prefix = "" # fallback: no data linking needed
         return ["R", "-e",
-                "setwd('%s'); %s knitr::knit('%s', output='%s')" % (wd, data_prefix, wp, out_md)]
+                "setwd('%s'); %s; knitr::knit('%s', output='%s')" % (wd, data_prefix, wp, out_md)]
     if ext == '.r' or ext == '.rdata':
         return ["Rscript", str(script_path)]
     if ext == '.py':

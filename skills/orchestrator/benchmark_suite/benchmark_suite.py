@@ -42,6 +42,9 @@ from orchestrator.reproducibility_evaluation.reproducibility_evaluation import (
 from orchestrator.benchmark_evaluation.benchmark_evaluation import (
     run_benchmark_evaluation,
 )
+from skills.agents.agent_preflight.runner import run_agent_preflight
+from skills.agents.agent_curator.curator_runner import run_agent_curator
+from skills.agents.agent_reproduce.runner import run_agent_reproduce as run_agent_reproduce_v2
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -138,6 +141,7 @@ def run_stage_dispatch(
         _benchmark_data_root,
         benchmark_type,
         download_data=not no_download,
+        output_name=output_dir.name,
     )
     collected_data['accepted_papers_summary'] = accepted_summary
 
@@ -152,11 +156,91 @@ def run_stage_dispatch(
         },
         'total_relevance_score': collected_data.get('total_relevance_score', 0),
         'accepted_papers_saved': accepted_summary.get('saved_count', 0),
-        'accepted_papers_dir': str(_benchmark_data_root / benchmark_type),
+        'accepted_papers_dir': str(_benchmark_data_root / f'{benchmark_type}_{output_dir.name}'),
     }
     save_summary(output_dir, summary)
 
     return collected_data
+
+
+
+def run_stage_preflight(
+    benchmark_type: str,
+    output_dir: Path,
+    summary: Dict[str, Any],
+    use_llm: bool = True,
+) -> Dict[str, Any]:
+    """Stage 0.5: AgentScanner — match protocol + code + data for each paper.
+
+    Reads experimental_protocol.json, scans data/ and benchmark_code/
+    directories, and calls the LLM to produce execution_plan.json.
+    """
+    print(f'\n{"=" * 60}')
+    print(f'  Stage 0.5: Agent Preflight [{benchmark_type}]')
+    print(f'{"=" * 60}')
+
+    data_root = _OMICSCLAW_ROOT / 'benchmark_data'
+    code_root = _OMICSCLAW_ROOT / 'benchmark_code'
+    data_dir = data_root / f'{benchmark_type}_{output_dir.name}'
+    code_dir = code_root / f'{benchmark_type}_{output_dir.name}'
+
+    if not data_dir.exists():
+        print(f'  ⚠️  Data dir not found: {data_dir}')
+        summary['stages']['00_agent_preflight'] = {
+            'status': 'skipped', 'reason': 'No data dir',
+        }
+        save_summary(output_dir, summary)
+        return {'status': 'skipped'}
+
+    result = run_agent_preflight(
+        benchmark_type=f'{benchmark_type}_{output_dir.name}',
+        data_root=data_root,
+        code_root=code_root,
+        use_llm=use_llm,
+    )
+
+    summary['stages']['00_agent_preflight'] = {
+        'status': 'completed',
+        'total_papers': result.get('total_papers', 0),
+        'status_counts': result.get('status_counts', {}),
+    }
+    save_summary(output_dir, summary)
+    return result
+
+
+def run_stage_curate(
+    benchmark_type: str,
+    output_dir: Path,
+    data_root: Path,
+    summary: Dict[str, Any],
+    use_llm: bool = False,
+) -> Dict[str, Any]:
+    """Stage 1: AgentCurator — LLM-driven data format detection & curation plan.
+
+    Reads execution_plan.json + data file listings for each paper,
+    produces curation_plan.json describing exactly how to convert raw
+    data into standardized AnnData (.h5ad) format.
+
+    This replaces the old ``run_stage_process_data`` hardcoded logic.
+    """
+    print(f'\n{"=" * 60}')
+    print(f'  Stage 1: Agent Curator — Data Format Detection')
+    print(f'{"=" * 60}')
+
+    result = run_agent_curator(
+        benchmark_type=f'{benchmark_type}_{output_dir.name}',
+        data_root=data_root,
+        use_llm=use_llm,
+    )
+
+    summary['stages']['01_agent_curator'] = {
+        'status': 'completed',
+        'total_papers': result.get('total_papers', 0),
+        'papers_with_plan': result.get('papers_with_plan', 0),
+        'papers_with_error': result.get('papers_with_error', 0),
+    }
+    save_summary(output_dir, summary)
+    return result
 
 
 def run_stage_reproduce(
@@ -171,7 +255,11 @@ def run_stage_reproduce(
     clone_depth: int,
     summary: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Stage 2: reproduce paper — clone, install, execute, verify."""
+    """Stage 2: reproduce paper — clone, install, execute, verify.
+
+    Uses agent_reproduce for script-level reproduction (Stage 2a)
+    and agent_curator's executor for h5ad→RDS bridge.
+    """
     reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
     reproduce_dir.mkdir(parents=True, exist_ok=True)
 
@@ -179,30 +267,21 @@ def run_stage_reproduce(
     print(f'  Stage 2: Reproduce Paper')
     print(f'{"=" * 60}')
 
-    # Determine input text for reproduce
+    # Step 1: Old-style reproduce (clone + install) — skip execution, keep for env setup
     reproduce_input = specific_input or repo_url or None
     if reproduce_input is None and collected_data.get('literature_results'):
         first = collected_data['literature_results'][0]
         reproduce_input = first.get('raw_text') or first.get('input')
 
-    if not reproduce_input:
-        print('  No suitable input for reproduction — skipping stage.')
-        summary['stages']['01_reproduce'] = {
-            'status': 'skipped',
-            'reason': 'No input text or repository URL available.',
-        }
-        save_summary(output_dir, summary)
-        return None
-
-    # Gather paper metadata from llm_collector results
     paper_metadata = None
     for lr in collected_data.get('literature_results', []):
         if lr.get('metadata') and lr.get('source') in ('llm_collector', 'pubmed', 'arxiv', 'github', 'google_scholar'):
             paper_metadata = lr.get('metadata', {})
             break
 
+    # Only keep clone + install from old pipeline
     reproduce_result = run_reproduce(
-        reproduce_input,
+        reproduce_input or '',
         'auto',
         repo_url,
         benchmark_type,
@@ -210,19 +289,59 @@ def run_stage_reproduce(
         output=reproduce_dir,
         no_clone=no_clone,
         no_install=no_install,
-        no_run=no_reproduce_run,
+        no_run=True,  # skip old execution; use agent_reproduce instead
         clone_depth=clone_depth,
     )
 
     result_statuses = reproduce_result.get('result', {}).get('statuses', {})
-    summary['stages']['01_reproduce'] = {
+
+    # Step 2: AgentReproduce for script-level execution + evaluation
+    bm_type = summary.get('metadata', {}).get('benchmark_type', benchmark_type)
+    # Use the same full path pattern as save_accepted_papers: {type}_{output_name}
+    data_root = _OMICSCLAW_ROOT / 'benchmark_data'
+    code_root = _OMICSCLAW_ROOT / 'benchmark_code'
+    data_dir = data_root / f'{bm_type}_{output_dir.name}'
+
+    # Discover all papers with execution_plan.json
+    paper_slugs = []
+    if data_dir.exists():
+        for pdir in sorted(data_dir.iterdir()):
+            if pdir.is_dir() and not pdir.name.startswith('_'):
+                ep = pdir / 'execution_plan.json'
+                if ep.exists():
+                    paper_slugs.append(pdir.name)
+
+    agent_results = []
+    for paper_slug in paper_slugs:
+        print(f'\n  ── AgentReproduce: {paper_slug[:55]} ──')
+        ar_result = run_agent_reproduce_v2(
+            paper_slug=paper_slug,
+            data_root=data_root,
+            code_root=code_root,
+            benchmark_type=bm_type,
+            max_fix_attempts=3,
+        )
+        agent_results.append(ar_result)
+        score = ar_result.get('reproducibility', {}).get('score', 'N/A')
+        pkg_count = len(ar_result.get('missing_packages', []))
+        print(f'  → Score: {score}/100, Missing packages: {pkg_count}')
+
+    summary['stages']['02_reproduce'] = {
         'status': 'completed',
         'output_dir': str(reproduce_dir),
         'clone_success': result_statuses.get('clone_success', False),
         'install_success': result_statuses.get('install_success', False),
-        'run_success': result_statuses.get('run_success', False),
-        'failure_phase': result_statuses.get('failure_phase'),
-        'reproduce_status': reproduce_result.get('status'),
+        'agent_papers': len(paper_slugs),
+        'agent_results': [
+            {
+                'paper': r.get('paper'),
+                'status': r.get('status'),
+                'score': r.get('reproducibility', {}).get('score'),
+                'scripts': r.get('scripts_completed', 0),
+                'total_scripts': r.get('total_scripts', 0),
+            }
+            for r in agent_results
+        ],
     }
     save_summary(output_dir, summary)
 
@@ -264,7 +383,8 @@ def run_stage_process_data(
         return {'processed': [], 'status': 'skipped'}
 
     bm_type = summary.get('metadata', {}).get('benchmark_type', '')
-    benchmark_data_root = _OMICSCLAW_ROOT / 'benchmark_data' / bm_type
+    # Must match save_accepted_papers output path: {type}_{output_name}
+    benchmark_data_root = _OMICSCLAW_ROOT / 'benchmark_data' / f'{bm_type}_{output_dir.name}'
 
     if not benchmark_data_root.exists():
         print(f'  No benchmark data found at: {benchmark_data_root}')

@@ -30,6 +30,8 @@ from literature.core.downloader import (
     download_from_zenodo,
     download_geo_dataset,
     download_sra_dataset,
+    clone_github_repo,
+    download_generic_code,
 )
 from orchestrator.reproduce_paper import run_reproduce
 
@@ -84,6 +86,7 @@ def main():
         benchmark_data_dir,
         args.benchmark_type,
         download_data=not args.no_download,
+        output_name=Path(args.output).name,
     )
     collected_data['accepted_papers_summary'] = accepted_summary
 
@@ -585,24 +588,85 @@ def _sanitize_folder_name(name: str, max_len: int = 60) -> str:
     return safe or 'paper'
 
 
+def _build_code_summary(code_bench_dir: Path, data_bench_dir: Path) -> Dict[str, Any]:
+    """Generate ``benchmark_code/_summary.json`` from cloned code artifacts.
+
+    Cross-references with ``benchmark_data`` to pull paper metadata
+    (title, github_repos, zenodo_code, cloned_repos errors).
+    """
+    code_summary: Dict[str, Any] = {
+        'benchmark_type': '',
+        'papers': [],
+    }
+    for d in sorted(code_bench_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        slug = d.name
+        # Read paper metadata from benchmark_data if available
+        title = ''
+        gh = []
+        zc = []
+        cloned = []
+        meta_file = data_bench_dir / slug / 'paper_metadata.json'
+        if meta_file.exists():
+            try:
+                m = json.loads(meta_file.read_text(encoding='utf-8'))
+                title = m.get('title', '')
+                gh = m.get('github_repos', [])
+                zc = m.get('zenodo_code', [])
+                cloned = m.get('cloned_repos', [])
+            except Exception:
+                pass
+
+        repos = []
+        for repo in d.iterdir():
+            if not repo.is_dir():
+                continue
+            has_git = (repo / '.git').exists()
+            files = list(repo.rglob('*'))
+            sz = sum(f.stat().st_size for f in files if f.is_file())
+            repos.append({
+                'name': repo.name,
+                'git': has_git,
+                'files': len(files),
+                'size_mb': round(sz / (1024 * 1024)) if sz > 0 else 0,
+            })
+
+        code_summary['papers'].append({
+            'slug': slug,
+            'title': title[:120] if title else '',
+            'github_repos': gh,
+            'zenodo_code': zc,
+            'cloned_repos': cloned,
+            'code_artifacts': repos,
+            'has_code': any(r['git'] for r in repos) or len(repos) > 0,
+        })
+
+    return code_summary
+
+
 def save_accepted_papers(
     collected_data: Dict[str, Any],
     root_dir: Path,
     benchmark_type: str,
     download_data: bool = True,
+    output_name: str = "",
 ) -> Dict[str, Any]:
     """Save FULLY_ACCEPTED papers to a per-benchmark, per-paper folder hierarchy.
 
     Creates::
 
         {root_dir}/
-          {benchmark_type}/
+          {benchmark_type}_{output_name}/
             {paper_slug}/
               paper_metadata.json
               data/
                 {gse_id}/
                 {sra_id}/
                 ...
+
+    The folder name is ``{benchmark_type}_{output_name}`` so that different
+    ``--output`` runs of the same benchmark type don't overwrite each other.
     """
     literature_results = collected_data.get('literature_results', [])
     accepted = [r for r in literature_results if r.get('acceptance') == 'FULLY_ACCEPTED']
@@ -611,7 +675,9 @@ def save_accepted_papers(
         print('  ⚠️  No FULLY_ACCEPTED papers to save.')
         return {'saved': 0, 'benchmark_type': benchmark_type, 'papers': []}
 
-    bench_dir = root_dir / benchmark_type
+    # Build folder name: {benchmark_type}_{output_name}, e.g. "integration_e2e_test"
+    folder_name = f"{benchmark_type}_{output_name}" if output_name else benchmark_type
+    bench_dir = root_dir / folder_name
     bench_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n  📁 Saving {len(accepted)} FULLY_ACCEPTED paper(s) to: {bench_dir}')
@@ -656,6 +722,7 @@ def save_accepted_papers(
             'zenodo_data': paper.get('zenodo_data', []),
             'zenodo_code': paper.get('zenodo_code', []),
             'figshare_links': paper.get('figshare_links', []),
+            'other_code_urls': paper.get('other_code_urls', []),
             'organism': paper.get('organism', ''),
             'tissue': paper.get('tissue', ''),
             'technology': paper.get('technology', ''),
@@ -665,6 +732,22 @@ def save_accepted_papers(
             'benchmark_type': benchmark_type,
             'saved_at': None,  # filled after download
         }
+
+        # ── Extract experimental protocol via LLM (read once, reuse forever) ──
+        protocol_text = paper.get('raw_text', '') or paper.get('full_text', '')
+        if protocol_text:
+            try:
+                from literature.core.llm_collector import llm_extract_experimental_protocol
+                protocol = llm_extract_experimental_protocol(protocol_text, benchmark_type)
+                if protocol:
+                    protocol['extracted_at'] = __import__('datetime').datetime.now(
+                        __import__('datetime').timezone.utc
+                    ).isoformat()
+                    proto_path = paper_dir / 'experimental_protocol.json'
+                    proto_path.write_text(json.dumps(protocol, indent=2, ensure_ascii=False), encoding='utf-8')
+                    print(f'    📝 [{slug}] Experimental protocol extracted ({len(json.dumps(protocol))} chars)')
+            except Exception as exc:
+                print(f'    ⚠️  [{slug}] Protocol extraction failed: {exc}')
 
         # ── Download data for this paper ──
         data_dir = paper_dir / 'data'
@@ -723,22 +806,6 @@ def save_accepted_papers(
                 except Exception as exc:
                     print(f'    ⚠️  Failed to download Zenodo data {zenodo_url}: {exc}')
 
-            # Zenodo code (GitHub snapshots — useful for re-discovery)
-            zenodo_code_links = paper.get('zenodo_code', []) or []
-            for zenodo_url in zenodo_code_links:
-                print(f'    📥 [{slug}] Downloading Zenodo code: {zenodo_url}')
-                try:
-                    result = download_from_zenodo(zenodo_url, data_dir / f'zenodo_{_sanitize_folder_name(zenodo_url[-20:], max_len=30)}')
-                    download_results.append(result)
-                    metadata.setdefault('downloaded_data', []).append({
-                        'type': 'zenodo_code',
-                        'id': zenodo_url,
-                        'status': result.get('status'),
-                        'path': str(data_dir),
-                    })
-                except Exception as exc:
-                    print(f'    ⚠️  Failed to download Zenodo code {zenodo_url}: {exc}')
-
             for cx_id in cellxgene_ids:
                 print(f'    📥 [{slug}] Downloading cellxgene: {cx_id}')
                 try:
@@ -752,6 +819,110 @@ def save_accepted_papers(
                     })
                 except Exception as exc:
                     print(f'    ⚠️  Failed to download cellxgene {cx_id}: {exc}')
+
+        # ── Clone / download code repositories to benchmark_code/ ──
+        github_repos = paper.get('github_repos', []) or []
+        zenodo_code_links = paper.get('zenodo_code', []) or []
+        figshare_links = paper.get('figshare_links', []) or []
+        other_code_urls = paper.get('other_code_urls', []) or []
+
+        code_root = root_dir.parent / 'benchmark_code'
+        code_bench_dir = code_root / folder_name / slug
+        code_bench_dir.mkdir(parents=True, exist_ok=True)
+        clone_results = []
+
+        # Try GitHub repos first; track if any succeeded
+        gh_success = False
+        for repo_url in github_repos:
+            if not repo_url or not repo_url.startswith('http'):
+                continue
+            print(f'    🧬 [{slug}] Cloning GitHub: {repo_url}')
+            try:
+                cr = clone_github_repo(repo_url, code_bench_dir, depth=1)
+                clone_results.append(cr)
+                if cr.get('status') == 'success':
+                    gh_success = True
+                metadata.setdefault('cloned_repos', []).append({
+                    'url': repo_url,
+                    'status': cr.get('status'),
+                    'path': cr.get('clone_path'),
+                    'branch': cr.get('branch'),
+                    'errors': cr.get('errors', []),
+                })
+            except Exception as exc:
+                print(f'    ❌ [{slug}] Clone exception {repo_url}: {exc}')
+                metadata.setdefault('cloned_repos', []).append({
+                    'url': repo_url,
+                    'status': 'failed',
+                    'errors': [str(exc)],
+                })
+
+        # Fallback 1: zenodo_code
+        if not gh_success and zenodo_code_links:
+            print(f'    🔄 [{slug}] GitHub failed — falling back to zenodo_code')
+            for zenodo_url in zenodo_code_links:
+                print(f'    📥 [{slug}] Zenodo code fallback: {zenodo_url}')
+                try:
+                    zr = download_from_zenodo(zenodo_url, code_bench_dir / f'zenodo_{_sanitize_folder_name(zenodo_url[-20:], max_len=30)}')
+                    clone_results.append(zr)
+                    metadata.setdefault('cloned_repos', []).append({
+                        'url': zenodo_url,
+                        'status': zr.get('status'),
+                        'path': str(code_bench_dir),
+                        'source': 'zenodo_code',
+                    })
+                except Exception as exc:
+                    print(f'    ❌ [{slug}] Zenodo code fallback failed {zenodo_url}: {exc}')
+
+        # Fallback 2: other_code_urls (keeper.mpdl.mpg.de, osf.io, gitlab, etc.)
+        if not gh_success and not zenodo_code_links and other_code_urls:
+            print(f'    🔄 [{slug}] GitHub+Zenodo failed — trying other_code_urls')
+            for oc_url in other_code_urls:
+                if not oc_url or not oc_url.startswith('http'):
+                    continue
+                print(f'    📥 [{slug}] Generic code download: {oc_url}')
+                try:
+                    gr = download_generic_code(oc_url, code_bench_dir)
+                    clone_results.append(gr)
+                    metadata.setdefault('cloned_repos', []).append({
+                        'url': oc_url,
+                        'status': gr.get('status'),
+                        'path': gr.get('path'),
+                        'source': 'other_code_url',
+                    })
+                except Exception as exc:
+                    print(f'    ❌ [{slug}] Other code download failed {oc_url}: {exc}')
+
+        # Fallback 3: figshare links (last resort for code)
+        if not gh_success and not zenodo_code_links and not other_code_urls and figshare_links:
+            print(f'    🔄 [{slug}] GitHub+Zenodo failed — falling back to figshare/generic URLs')
+            for f_url in figshare_links:
+                if not f_url or not f_url.startswith('http'):
+                    continue
+                print(f'    📥 [{slug}] Generic code download: {f_url}')
+                try:
+                    gr = download_generic_code(f_url, code_bench_dir)
+                    clone_results.append(gr)
+                    metadata.setdefault('cloned_repos', []).append({
+                        'url': f_url,
+                        'status': gr.get('status'),
+                        'path': gr.get('path'),
+                        'source': 'generic_url',
+                    })
+                except Exception as exc:
+                    print(f'    ❌ [{slug}] Generic code download failed {f_url}: {exc}')
+
+        # ── Unpack compressed files after download ──
+        if download_data and data_dir.exists() and any(data_dir.iterdir()):
+            try:
+                from literature.core.downloader import unpack_data_files
+                unpack_result = unpack_data_files(str(data_dir))
+                if unpack_result.get('unpacked', 0) > 0:
+                    print(f'    📦 [{slug}] Unpacked {unpack_result["unpacked"]} archive(s)')
+                metadata['unpacked_files'] = unpack_result
+            except Exception as exc:
+                print(f'    ⚠️  [{slug}] Unpack failed: {exc}')
+                metadata['unpacked_files'] = {'error': str(exc)}
 
         # ── Fill timestamp and write metadata ──
         from datetime import datetime, timezone
@@ -776,10 +947,20 @@ def save_accepted_papers(
 
     summary['saved_count'] = len(summary['papers'])
 
-    # Write overall summary for this benchmark type
+    # Write overall summary for this benchmark type (data)
     summary_path = bench_dir / '_summary.json'
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding='utf-8')
-    print(f'  📊 Summary saved to: {summary_path}')
+    print(f'  📊 Data summary saved to: {summary_path}')
+
+    # ── Generate benchmark_code/_summary.json ──
+    code_root = root_dir.parent / 'benchmark_code'
+    code_bench = code_root / folder_name
+    if code_bench.exists():
+        code_summary = _build_code_summary(code_bench, bench_dir)
+        if code_summary:
+            cs_path = code_bench / '_summary.json'
+            cs_path.write_text(json.dumps(code_summary, indent=2, ensure_ascii=False), encoding='utf-8')
+            print(f'  📊 Code summary saved to: {cs_path}')
 
     return summary
 

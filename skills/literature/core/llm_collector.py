@@ -517,6 +517,7 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"    \"figshare_links\": [...],\n"
         f"    \"zenodo_data\": [...],\n"
         f"    \"zenodo_code\": [...],\n"
+        f"    \"other_code_urls\": [...],\n"
         f"    \"data_format\": [\"h5ad\", \"mtx\", \"rds\", \"loom\", \"seurat\", \"other\"],\n"
         f"    \"num_samples\": \"...\",\n"
         f"    \"num_cells\": \"...\",\n"
@@ -554,6 +555,11 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"    * Put dataset DOIs/URLs in **zenodo_data** (raw .h5ad/.mtx/.rds files, count matrices, supplements)\n"
         f"    * Put software/notebook DOIs/URLs in **zenodo_code** (code archives, Python packages, analysis scripts)\n"
         f"    * If unsure, include in BOTH lists.\n"
+        f"- **New: capture institutional/non-standard code URLs in other_code_urls**.\n"
+        f"    * ANY code repository URL that is NOT GitHub and NOT Zenodo (Figshare links already have their own key figshare_links).\n"
+        f"    * Examples: keeper.mpdl.mpg.de, osf.io, dryad, institutional GitLab, custom data portals.\n"
+        f"    * Look for URLs in 'Code Availability' sections that don't match github.com or zenodo.org patterns.\n"
+        f"    * Pay attention to URLs like 'https://keeper.mpdl.mpg.de/d/...', 'https://osf.io/...', 'https://gitlab.com/...' etc.\n"
         f"- Penalize (score ≤ 3) papers that only reanalyze existing public data without providing new data or reusable code.\n"
         f"- If the text contains no datasets, return empty arrays.\n"
         f"\n--- Data requirements for {benchmark_type} benchmark ---\n"
@@ -1714,12 +1720,16 @@ def _llm_collect_impl(
                 'zenodo_data': llm_data.get('zenodo_data', []),
                 'zenodo_code': llm_data.get('zenodo_code', []),
                 'figshare_links': llm_data.get('figshare_links', []),
+                'other_code_urls': llm_data.get('other_code_urls', []),
                 'relevance_score': relevance,
                 'organism': organism,
                 'tissue': tissue,
                 'technology': technology,
                 'reason': llm_data.get('reason', ''),
                 'methods_summary': llm_data.get('methods_summary', ''),
+                # Keep the full text for downstream deep extraction (experimental_protocol.json)
+                'raw_text': text,
+                'full_text': text,
             }
             round_results.append(result_entry)
 
@@ -1773,4 +1783,118 @@ def _llm_collect_impl(
     )
 
     return all_results[:max_results]
+
+
+def llm_extract_experimental_protocol(
+    paper_text: str,
+    benchmark_type: str,
+) -> Optional[Dict[str, Any]]:
+    """Deep-read a FULLY_ACCEPTED paper to extract its experimental protocol.
+
+    Unlike ``llm_extract_paper_details`` which focuses on dataset accessions,
+    this function extracts the step-by-step analysis pipeline, software
+    versions, key parameters, and expected outputs.  The result is saved as
+    ``experimental_protocol.json`` in the paper's ``benchmark_data`` folder
+    and reused by Stage 2 (reproduce) and Stage 4 (benchmark evaluation) to
+    avoid re-reading the full paper text each time.
+
+    Returns a dict with keys:
+        overview, data_generation, processing_pipeline (list of dicts),
+        key_parameters, software_versions, expected_outputs, code_dispatch
+    """
+    # ── Smart truncation: prioritise the Methods & Results sections ──
+    # The paper text can be very long (80K+ chars). Instead of blindly
+    # taking the first 16000 chars, we try to find the Methods section
+    # and include its full content + a tail section for Results.
+    max_chars = 24000
+    truncated = paper_text[:max_chars]
+    methods_idx = paper_text.lower().find('methods')
+    if methods_idx >= 0:
+        # Take from Methods onward, capped at max_chars
+        truncated = paper_text[methods_idx:methods_idx + max_chars]
+        # Also include the first 2000 chars (title + abstract) for context
+        truncated = paper_text[:2000] + '\n[--- Abstract truncated ---]\n' + truncated
+    paper_excerpt = truncated[:max_chars]
+
+    prompt = (
+        f"You are an expert in extracting computational biology protocols from "
+        f"scientific papers.  Read the following paper text and extract a "
+        f"detailed, structured experimental & analysis protocol suitable for "
+        f"reproducing the {benchmark_type} analysis.\n\n"
+        f"Paper text (may be truncated at ~{max_chars} chars):\n{paper_excerpt}\n\n"
+        f"Return a JSON object with these keys:\n\n"
+        f'{{\n'
+        f'  "overview": "one-sentence summary of the experimental design and goal",\n'
+        f'  "data_generation": {{\n'
+        f'    "samples": ["sample_1 description (including sample size, conditions)"],\n'
+        f'    "platform": "10x Genomics 3\' v3 / Smart-seq2 / 10x Visium / ...",\n'
+        f'    "sequencing": "NovaSeq 6000, PE150 / ...",\n'
+        f'    "quality_control": "Cell Ranger v7.1, filtering criteria, doublet removal..."\n'
+        f'  }},\n'
+        f'  "processing_pipeline": [\n'
+        f'    {{\n'
+        f'      "step": 1, "step_name": "Quality control",\n'
+        f'      "tool": "Seurat::CreateSeuratObject / scanpy.pp.filter_cells",\n'
+        f'      "version": "5.0.1 / 1.9.3",\n'
+        f'      "input": "raw count matrix / .mtx / .h5ad",\n'
+        f'      "output": "filtered AnnData / Seurat object",\n'
+        f'      "action": "Filter cells with <200 genes, >20% mitochondrial reads"\n'
+        f'    }},\n'
+        f'    {{\n'
+        f'      "step": 2, "step_name": "Normalization",\n'
+        f'      "tool": "...", "version": "...",\n'
+        f'      "input": "...", "output": "...", "action": "..."\n'
+        f'    }},\n'
+        f'    ...\n'
+        f'  ],\n'
+        f'  "key_parameters": {{\n'
+        f'    "filtering": "min_genes=200, max_mt=20%, min_cells=3",\n'
+        f'    "normalization": "SCTransform / log-normalize target_sum=10000",\n'
+        f'    "integration": "Harmony on \'sample\' covariate, dims=1:30",\n'
+        f'    "clustering": "resolution=0.8, dims=1:30, algorithm=Leiden",\n'
+        f'    "differential_expression": "MAST / Wilcoxon / DESeq2, log2FC>0.25, p_adj<0.05",\n'
+        f'    "cell_annotation": "SingleR / manual marker genes / Azimuth reference mapping"\n'
+        f'  }},\n'
+        f'  "software_versions": {{\n'
+        f'    "R": "4.3.0", "Python": "3.10", "Seurat": "5.0.1", "scanpy": "1.9.3",\n'
+        f'    "Harmony": "0.1.1", "scVI": "1.0.4", "...": "..."\n'
+        f'  }},\n'
+        f'  "expected_outputs": [\n'
+        f'    "UMAP embedding with batch-corrected coordinates",\n'
+        f'    "DEG list per cell type between conditions",\n'
+        f'    "Clustering labels for ~N cells"\n'
+        f'  ],\n'
+        f'  "code_dispatch": {{\n'
+        f'    "entry_point": "main.R / run_pipeline.py / ...",\n'
+        f'    "key_scripts": ["script1.R", "script2.py"],\n'
+        f'    "expected_runtime": "2-4 hours on GPU / ...",\n'
+        f'    "hardware_notes": "GPU recommended for scVI training"\n'
+        f'  }}\n'
+        f'}}\n\n'
+        f'Rules:\n'
+        f'- Extract ONLY information explicitly stated in the paper text.\n'
+        f'- If a tool/workflow is mentioned but its version is not given,\n'
+        f'  set version="" (do NOT guess).\n'
+        f'- If a section is completely absent, use "" for string fields,\n'
+        f'  [] for arrays, {{}} for objects.\n'
+        f'- The "processing_pipeline" should list steps in order (step 1, 2, ...).\n'
+        f'- Focus on the single-cell processing and {benchmark_type}-relevant steps.\n'
+        f'- Return ONLY valid JSON, no markdown wrappers, no explanation.'
+    )
+
+    raw = _call_llm(
+        prompt,
+        system_prompt="You are a skilled scientific protocol extractor. Output ONLY valid JSON.",
+        temperature=0.15,
+        call_type='extract_experimental_protocol',
+        llm_model=_MODEL_FLASH,
+    )
+    if not raw:
+        return None
+
+    result = _parse_llm_json(raw)
+    _audit_record_parsed(result)
+    if not isinstance(result, dict):
+        return None
+    return result
 

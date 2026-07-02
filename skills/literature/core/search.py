@@ -954,10 +954,12 @@ def _get_proxy_url() -> str:
                 from urllib.parse import quote
                 proxy_host = os.environ.get('FUDAN_PROXY_HOST', 'libproxy.fudan.edu.cn:8080').strip()
                 proxy = f'http://{quote(fudan_user, safe="")}:{quote(pwd, safe="")}@{proxy_host}'
-                logger.debug('Loaded proxy credentials from keyring')
+                logger.debug('Loaded proxy credentials from keyring for user %s', fudan_user)
                 return proxy
-        except Exception:
-            pass
+            else:
+                logger.debug('No password found in keyring for user %s — run: keyring set OmicsClaw.FudanProxy %s', fudan_user, fudan_user)
+        except Exception as exc:
+            logger.debug('keyring lookup failed for %s: %s', fudan_user, exc)
 
     return ''
 
