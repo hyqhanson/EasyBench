@@ -45,6 +45,10 @@ The benchmark is built *from* the data.
 | 3 | `reproducibility_evaluation` | Scores clone / install / run / verify phases, suggests missing metrics. | `reproducibility_metrics.json` |
 | 4 | `benchmark_evaluation` | Uses autoagent evaluator to compute biological metrics (iLISI, silhouette, etc.), generates rankings and composite scores. | `benchmark_metrics.json`, `benchmark_report.md` |
 
+Stage 0 is the main discovery and landing-zone step. See
+[`docs/engineering/easybench-stage0.md`](docs/engineering/easybench-stage0.md)
+for the code path, data flow, outputs, and current implementation caveats.
+
 ---
 
 ## Quick Start
@@ -69,6 +73,13 @@ python -m skills.orchestrator.benchmark_suite.benchmark_suite \
   --output ./quick_test \
   --use-llm \
   --no-download --no-process --no-reproduce-clone --no-reproduce-install --no-reproduce-run --no-evaluate
+
+# Stage 0 search-quality test only: no benchmark_data/ or benchmark_code/ writes
+python -m skills.orchestrator.benchmark_suite.benchmark_suite \
+  --benchmark-type integration \
+  --output ./stage0_runs/integration \
+  --use-llm \
+  --search-only
 ```
 
 ---
@@ -82,6 +93,9 @@ output_dir/
       llm_results.json           # Final search results
       llm_audit.json             # LLM prompts & decisions (debuggable)
       llm_{pmid}/                # Per-paper metadata
+    stage0_quality_summary.json  # Source/acceptance counts and quality flags
+    stage0_quality_summary.md    # Human-readable Stage 0 comparison report
+    data_summary.md
   01_process_data/               # Processed .h5ad files
   02_reproduce/reproducibility/  # Reproduction artifacts
     plan.json / result.json / report.md / commands.sh

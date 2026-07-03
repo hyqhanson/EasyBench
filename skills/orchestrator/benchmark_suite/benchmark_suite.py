@@ -32,6 +32,7 @@ from orchestrator.benchmark_dispatch.benchmark_dispatch import (
     generate_workflow_plan,
     save_results,
     save_accepted_papers,
+    save_stage0_quality_report,
 )
 from orchestrator.reproduce_paper.reproduce_paper import run_reproduce
 from orchestrator.reproducibility_evaluation.reproducibility_evaluation import (
@@ -42,9 +43,6 @@ from orchestrator.reproducibility_evaluation.reproducibility_evaluation import (
 from orchestrator.benchmark_evaluation.benchmark_evaluation import (
     run_benchmark_evaluation,
 )
-from skills.agents.agent_preflight.runner import run_agent_preflight
-from skills.agents.agent_curator.curator_runner import run_agent_curator
-from skills.agents.agent_reproduce.runner import run_agent_reproduce as run_agent_reproduce_v2
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -115,6 +113,7 @@ def run_stage_dispatch(
     no_download: bool,
     summary: Dict[str, Any],
     use_llm: bool = False,
+    search_only: bool = False,
 ) -> Dict[str, Any]:
     """Stage 0: benchmark dispatch — collect literature & datasets."""
     dispatch_dir = stage_dir(output_dir, 0, 'benchmark_dispatch')
@@ -128,27 +127,46 @@ def run_stage_dispatch(
 
     collected_data = collect_benchmark_data(
         search_queries, benchmark_type, specific_input,
-        dispatch_dir, no_download, use_llm=use_llm,
+        dispatch_dir, no_download or search_only, use_llm=use_llm,
     )
-
-    workflow_plan = generate_workflow_plan(benchmark_type, collected_data)
-    save_results(workflow_plan, collected_data, dispatch_dir)
 
     # Save FULLY_ACCEPTED papers to per-benchmark, per-paper folder structure
     _benchmark_data_root = _OMICSCLAW_ROOT / 'benchmark_data'
-    accepted_summary = save_accepted_papers(
-        collected_data,
-        _benchmark_data_root,
-        benchmark_type,
-        download_data=not no_download,
-        output_name=output_dir.name,
-    )
+    if search_only:
+        accepted_summary = {
+            'status': 'skipped',
+            'reason': '--search-only',
+            'saved_count': 0,
+            'benchmark_type': benchmark_type,
+            'papers': [],
+        }
+        print('  🔎 Search-only mode: skipping accepted-paper save, data download, and code clone.')
+    else:
+        accepted_summary = save_accepted_papers(
+            collected_data,
+            _benchmark_data_root,
+            benchmark_type,
+            download_data=not no_download,
+            output_name=output_dir.name,
+        )
     collected_data['accepted_papers_summary'] = accepted_summary
+
+    workflow_plan = generate_workflow_plan(benchmark_type, collected_data)
+    save_results(workflow_plan, collected_data, dispatch_dir)
+    quality_summary = save_stage0_quality_report(
+        collected_data,
+        dispatch_dir,
+        accepted_summary,
+        search_only=search_only,
+    )
 
     summary['stages']['00_benchmark_dispatch'] = {
         'status': 'completed',
         'output_dir': str(dispatch_dir),
+        'search_only': search_only,
         'literature_count': len(collected_data.get('literature_results', [])),
+        'raw_literature_count': collected_data.get('raw_literature_count', len(collected_data.get('literature_results', []))),
+        'filtered_out_no_dataset_count': collected_data.get('filtered_out_no_dataset_count', 0),
         'datasets_found': {
             'geo': len(collected_data.get('datasets', {}).get('geo', [])),
             'sra': len(collected_data.get('datasets', {}).get('sra', [])),
@@ -156,7 +174,13 @@ def run_stage_dispatch(
         },
         'total_relevance_score': collected_data.get('total_relevance_score', 0),
         'accepted_papers_saved': accepted_summary.get('saved_count', 0),
-        'accepted_papers_dir': str(_benchmark_data_root / f'{benchmark_type}_{output_dir.name}'),
+        'accepted_papers_status': accepted_summary.get('status', 'completed'),
+        'accepted_papers_dir': '' if search_only else str(_benchmark_data_root / f'{benchmark_type}_{output_dir.name}'),
+        'quality_summary': {
+            'path': str(dispatch_dir / 'stage0_quality_summary.json'),
+            'fully_accepted_count': quality_summary.get('fully_accepted_count', 0),
+            'quality_flag_counts': quality_summary.get('quality_flag_counts', {}),
+        },
     }
     save_summary(output_dir, summary)
 
@@ -192,6 +216,8 @@ def run_stage_preflight(
         save_summary(output_dir, summary)
         return {'status': 'skipped'}
 
+    from skills.agents.agent_preflight.runner import run_agent_preflight
+
     result = run_agent_preflight(
         benchmark_type=f'{benchmark_type}_{output_dir.name}',
         data_root=data_root,
@@ -226,6 +252,8 @@ def run_stage_curate(
     print(f'\n{"=" * 60}')
     print(f'  Stage 1: Agent Curator — Data Format Detection')
     print(f'{"=" * 60}')
+
+    from skills.agents.agent_curator.curator_runner import run_agent_curator
 
     result = run_agent_curator(
         benchmark_type=f'{benchmark_type}_{output_dir.name}',
@@ -314,6 +342,8 @@ def run_stage_reproduce(
     agent_results = []
     for paper_slug in paper_slugs:
         print(f'\n  ── AgentReproduce: {paper_slug[:55]} ──')
+        from skills.agents.agent_reproduce.runner import run_agent_reproduce as run_agent_reproduce_v2
+
         ar_result = run_agent_reproduce_v2(
             paper_slug=paper_slug,
             data_root=data_root,
@@ -879,6 +909,7 @@ def run_benchmark_suite(
     include_suggestions: bool = True,
     use_llm: bool = False,
     no_evaluate: bool = False,
+    search_only: bool = False,
 ) -> Dict[str, Any]:
     """Run the full benchmark pipeline with checkpoint resumption."""
     output_dir = Path(output).resolve()
@@ -892,6 +923,7 @@ def run_benchmark_suite(
         'benchmark_type': benchmark_type,
         'query': query,
         'resume': resume,
+        'search_only': search_only,
         'started_at': datetime.now(timezone.utc).isoformat(),
     }
 
@@ -905,12 +937,29 @@ def run_benchmark_suite(
         collected_data = run_stage_dispatch(
             benchmark_type, query, specific_input,
             output_dir, no_download, summary, use_llm=use_llm,
+            search_only=search_only,
         )
         mark_stage_completed(output_dir, 0)
         # HUMAN CHECKPOINT
         print(f'\n  🛑 CHECKPOINT: Stage 0 complete. Review artifacts at:')
         print(f'     {stage_dir(output_dir, 0, "benchmark_dispatch")}')
         print(f'     Run with --resume to skip to Stage 1.\n')
+
+    if search_only:
+        summary['completed_at'] = datetime.now(timezone.utc).isoformat()
+        save_summary(output_dir, summary)
+
+        print(f'\n{"=" * 60}')
+        print(f'  ✅ Stage 0 Search Complete')
+        print(f'{"=" * 60}')
+        print(f'  Summary: {output_dir / SUMMARY_FILE}')
+        print(f'  Quality: {stage_dir(output_dir, 0, "benchmark_dispatch") / "stage0_quality_summary.md"}')
+        return {
+            'summary_path': str(output_dir / SUMMARY_FILE),
+            'quality_summary_path': str(stage_dir(output_dir, 0, 'benchmark_dispatch') / 'stage0_quality_summary.json'),
+            'output_dir': str(output_dir),
+            'search_only': True,
+        }
 
     # --- Stage 1: Process downloaded data ---
     if resume and is_stage_completed(output_dir, 1):
@@ -1043,6 +1092,8 @@ def parse_args() -> argparse.Namespace:
                         help='Use LLM for intelligent literature search and dataset extraction')
     parser.add_argument('--no-evaluate', action='store_true',
                         help='Skip benchmark evaluation stage')
+    parser.add_argument('--search-only', action='store_true',
+                        help='Only run Stage 0 search/reporting; do not save accepted papers, clone code, or run later stages')
     return parser.parse_args()
 
 
@@ -1065,6 +1116,7 @@ def main() -> int:
             include_suggestions=not args.no_suggestions,
             use_llm=args.use_llm,
             no_evaluate=args.no_evaluate,
+            search_only=args.search_only,
         )
         return 0
     except Exception as exc:

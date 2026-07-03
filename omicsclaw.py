@@ -918,6 +918,9 @@ def _run_benchmark_suite(
     """Run the benchmark-suite pipeline end-to-end."""
     if str(OMICSCLAW_DIR) not in sys.path:
         sys.path.insert(0, str(OMICSCLAW_DIR))
+    skills_dir = OMICSCLAW_DIR / "skills"
+    if str(skills_dir) not in sys.path:
+        sys.path.insert(0, str(skills_dir))
 
     from orchestrator.benchmark_suite.benchmark_suite import run_benchmark_suite
 
@@ -951,6 +954,8 @@ def _run_benchmark_suite(
     no_suggestions = _has_flag("no-suggestions") or _has_flag("bench-no-suggestions")
     use_llm = _has_flag("use-llm") or _has_flag("bench-use-llm")
     no_process = _has_flag("no-process") or _has_flag("bench-no-process")
+    no_evaluate = _has_flag("no-evaluate") or _has_flag("bench-no-evaluate")
+    search_only = _has_flag("search-only") or _has_flag("bench-search-only")
 
     if not output_dir:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -973,6 +978,8 @@ def _run_benchmark_suite(
             include_suggestions=not no_suggestions,
             use_llm=use_llm,
             no_process=no_process,
+            no_evaluate=no_evaluate,
+            search_only=search_only,
         )
         duration = round(time.time() - t0, 2)
         return {
@@ -1417,14 +1424,17 @@ def main():
     run_p.add_argument("--cutoff-method")
     # benchmark-suite-specific
     run_p.add_argument("--benchmark-type")
-    run_p.add_argument("--query")
     run_p.add_argument("--resume", action="store_true")
     run_p.add_argument("--no-download", action="store_true", dest="bench_no_download")
+    run_p.add_argument("--no-process", action="store_true", dest="bench_no_process")
     run_p.add_argument("--no-reproduce-clone", action="store_true", dest="bench_no_reproduce_clone")
     run_p.add_argument("--no-reproduce-install", action="store_true", dest="bench_no_reproduce_install")
     run_p.add_argument("--no-reproduce-run", action="store_true", dest="bench_no_reproduce_run")
-    run_p.add_argument("--clone-depth", type=int, default=1, dest="bench_clone_depth")
+    run_p.add_argument("--clone-depth", type=int, dest="bench_clone_depth")
     run_p.add_argument("--no-suggestions", action="store_true", dest="bench_no_suggestions")
+    run_p.add_argument("--use-llm", action="store_true", dest="bench_use_llm")
+    run_p.add_argument("--no-evaluate", action="store_true", dest="bench_no_evaluate")
+    run_p.add_argument("--search-only", action="store_true", dest="bench_search_only")
 
     # Use parse_known_args so `run` can pass through skill-specific flags that
     # are not explicitly registered at the top-level CLI parser.
@@ -2012,6 +2022,9 @@ def main():
             "mapping_file": "--mapping-file",
             "clinical": "--clinical",
             "cutoff_method": "--cutoff-method",
+            # benchmark-suite-specific
+            "benchmark_type": "--benchmark-type",
+            "bench_clone_depth": "--clone-depth",
         }
         # flags whose values are file paths — resolve to absolute so subprocess cwd doesn't matter
         _FILE_PATH_FLAGS = {"reference", "reference_slice", "model", "batch_info", "clinical", "mapping_file"}
@@ -2028,6 +2041,26 @@ def main():
             extra.append("--refine")
         if getattr(args, "no_gpu", False):
             extra.append("--no-gpu")
+        if getattr(args, "resume", False):
+            extra.append("--resume")
+        if getattr(args, "bench_no_download", False):
+            extra.append("--no-download")
+        if getattr(args, "bench_no_process", False):
+            extra.append("--no-process")
+        if getattr(args, "bench_no_reproduce_clone", False):
+            extra.append("--no-reproduce-clone")
+        if getattr(args, "bench_no_reproduce_install", False):
+            extra.append("--no-reproduce-install")
+        if getattr(args, "bench_no_reproduce_run", False):
+            extra.append("--no-reproduce-run")
+        if getattr(args, "bench_no_suggestions", False):
+            extra.append("--no-suggestions")
+        if getattr(args, "bench_use_llm", False):
+            extra.append("--use-llm")
+        if getattr(args, "bench_no_evaluate", False):
+            extra.append("--no-evaluate")
+        if getattr(args, "bench_search_only", False):
+            extra.append("--search-only")
         # nargs="+" args
         if getattr(args, "reference_cat", None):
             extra.extend(["--reference-cat"] + args.reference_cat)
