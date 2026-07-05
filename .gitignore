@@ -41,6 +41,8 @@ sessions/
 # Superpowers (local/internal agent workflow notes)
 superpowers/
 docs/superpowers/
+EasyBench_PROJECT_STATE*.md
+api_setup_guide*.md
 
 # User data (large, not committed)
 data/*
@@ -144,3 +146,8 @@ resources/
 .codex
 .planning/
 e2e_test
+
+# EasyBench local run artifacts
+benchmark_code/
+benchmark_data/
+stage0_runs/

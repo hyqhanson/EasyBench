@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+from collections import Counter, defaultdict
 import json
 import re
 import sys
@@ -46,6 +47,8 @@ def main():
     parser.add_argument('--output', required=True, help='Output directory')
     parser.add_argument('--no-download', action='store_true',
                        help='Skip data download, only collect metadata')
+    parser.add_argument('--search-only', action='store_true',
+                       help='Only run literature/data search and reporting; do not save accepted papers, download data, clone code, or reproduce')
     parser.add_argument('--no-reproduce', action='store_true',
                        help='Skip the reproduce-paper step')
     parser.add_argument('--reproduce-no-clone', action='store_true',
@@ -76,26 +79,36 @@ def main():
     
     # Step 2: Collect literature and extract datasets
     collected_data = collect_benchmark_data(search_queries, args.benchmark_type, 
-                                          args.input, output_dir, args.no_download,
+                                          args.input, output_dir, args.no_download or args.search_only,
                                           use_llm=args.use_llm)
     
     # Step 2.5: Save FULLY_ACCEPTED papers to per-benchmark, per-paper folder structure
     benchmark_data_dir = Path(args.benchmark_data_dir)
-    accepted_summary = save_accepted_papers(
-        collected_data,
-        benchmark_data_dir,
-        args.benchmark_type,
-        download_data=not args.no_download,
-        output_name=Path(args.output).name,
-    )
+    if args.search_only:
+        accepted_summary = {
+            'status': 'skipped',
+            'reason': '--search-only',
+            'saved_count': 0,
+            'benchmark_type': args.benchmark_type,
+            'papers': [],
+        }
+        print('  🔎 Search-only mode: skipping accepted-paper save, data download, and code clone.')
+    else:
+        accepted_summary = save_accepted_papers(
+            collected_data,
+            benchmark_data_dir,
+            args.benchmark_type,
+            download_data=not args.no_download,
+            output_name=Path(args.output).name,
+        )
     collected_data['accepted_papers_summary'] = accepted_summary
 
     # Step 2.6: Re-discover data for papers whose initial downloads are insufficient
-    if not args.no_download:
+    if not args.no_download and not args.search_only:
         rediscovery_result = rediscover_paper_data_if_needed(benchmark_data_dir, args.benchmark_type)
         collected_data['rediscovery'] = rediscovery_result
 
-    if not args.no_reproduce:
+    if not args.no_reproduce and not args.search_only:
         print("\n🔧 Running reproduce-paper workflow...")
         reproduce_input = args.input or args.repo_url or None
         if reproduce_input is None and collected_data['literature_results']:
@@ -122,6 +135,7 @@ def main():
     
     # Step 4: Save results
     save_results(workflow_plan, collected_data, output_dir)
+    save_stage0_quality_report(collected_data, output_dir, accepted_summary, search_only=args.search_only)
     
     print(f"\n✅ Benchmark setup complete!")
     print(f"📋 Workflow plan saved to: {output_dir / 'workflow_plan.json'}")
@@ -214,6 +228,7 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
             if isinstance(llm_results, dict) and 'audit' in llm_results:
                 (literature_dir / 'llm_audit.json').write_text(json.dumps(llm_results['audit'], indent=2))
             results_list = llm_results.get('results', llm_results) if isinstance(llm_results, dict) else llm_results
+            collected_data['raw_literature_results'] = list(results_list)
             _elapsed = _time.time() - _t0
             print(f"\n  📊 LLM search complete: {len(results_list)} papers in {_elapsed:.0f}s")
             for result in results_list:
@@ -270,6 +285,8 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
                 if result:
                     collected_data['literature_results'].append(result)
                     collected_data['total_relevance_score'] += result.get('relevance_score', 0)
+
+    collected_data.setdefault('raw_literature_results', list(collected_data['literature_results']))
     
     # Aggregate datasets
     for result in collected_data['literature_results']:
@@ -322,6 +339,9 @@ def collect_benchmark_data(search_queries: List[str], benchmark_type: str,
         )
     ]
     after = len(collected_data['literature_results'])
+    collected_data['raw_literature_count'] = before
+    collected_data['filtered_literature_count'] = after
+    collected_data['filtered_out_no_dataset_count'] = before - after
     if before != after:
         print(f"  Filtered out {before - after} literature result(s) with no dataset accessions.")
     
@@ -1125,6 +1145,219 @@ def _extract_data_urls_from_zip(zip_path: Path) -> List[str]:
     except Exception as e:
         print(f'    ⚠️  Error reading zip {zip_path.name}: {e}')
     return list(set(urls))  # deduplicate
+
+
+def _list_value(item: Dict[str, Any], key: str) -> List[Any]:
+    value = item.get(key, [])
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _real_data_count(item: Dict[str, Any]) -> int:
+    gse = [g for g in _list_value(item, 'gse_ids') if g and g != 'INFERRED_DATA']
+    return (
+        len(gse)
+        + len(_list_value(item, 'sra_ids'))
+        + len(_list_value(item, 'cellxgene_ids'))
+        + len(_list_value(item, 'zenodo_data'))
+    )
+
+
+def _code_count(item: Dict[str, Any]) -> int:
+    return (
+        len(_list_value(item, 'github_repos'))
+        + len(_list_value(item, 'zenodo_code'))
+        + len(_list_value(item, 'figshare_links'))
+        + len(_list_value(item, 'other_code_urls'))
+    )
+
+
+def _tokenize_for_match(text: str) -> set:
+    stop = {
+        'and', 'the', 'for', 'with', 'from', 'into', 'through', 'using',
+        'single', 'cell', 'cells', 'rna', 'seq', 'scrna', 'analysis',
+        'atlas', 'data', 'dataset', 'datasets', 'study', 'human', 'mouse',
+    }
+    return {
+        t for t in re.split(r'[^a-z0-9]+', text.lower())
+        if len(t) >= 4 and t not in stop
+    }
+
+
+def _suspicious_github_repos(item: Dict[str, Any]) -> List[str]:
+    title_tokens = _tokenize_for_match(item.get('title') or item.get('input') or '')
+    suspicious = []
+    for url in _list_value(item, 'github_repos'):
+        repo = str(url).rstrip('/').split('/')[-1]
+        repo_tokens = _tokenize_for_match(repo)
+        if title_tokens and repo_tokens and not (title_tokens & repo_tokens):
+            suspicious.append(str(url))
+    return suspicious
+
+
+def build_stage0_quality_summary(
+    collected_data: Dict[str, Any],
+    accepted_summary: Dict[str, Any] | None = None,
+    search_only: bool = False,
+) -> Dict[str, Any]:
+    """Build a source-level Stage 0 quality summary for comparable runs."""
+    raw_results = collected_data.get('raw_literature_results') or collected_data.get('literature_results', [])
+    filtered_results = collected_data.get('literature_results', [])
+    accepted_summary = accepted_summary or collected_data.get('accepted_papers_summary', {})
+
+    def _counter(items: List[Dict[str, Any]], key: str) -> Dict[str, int]:
+        return dict(Counter(item.get(key, 'UNKNOWN') for item in items))
+
+    source_acceptance: Dict[str, Dict[str, int]] = defaultdict(dict)
+    _tmp: Dict[str, Counter] = defaultdict(Counter)
+    for item in raw_results:
+        _tmp[item.get('source', 'UNKNOWN')][item.get('acceptance', 'UNKNOWN')] += 1
+    source_acceptance = {source: dict(counter) for source, counter in sorted(_tmp.items())}
+
+    source_efficiency = []
+    for source, counts in source_acceptance.items():
+        total = sum(counts.values())
+        full = counts.get('FULLY_ACCEPTED', 0)
+        source_efficiency.append({
+            'source': source,
+            'total': total,
+            'fully_accepted': full,
+            'fully_accepted_rate': round(full / total, 4) if total else 0.0,
+            'data_only': counts.get('DATA_ONLY', 0),
+            'code_only': counts.get('CODE_ONLY', 0),
+            'rejected': counts.get('REJECTED', 0),
+        })
+    source_efficiency.sort(key=lambda row: (-row['fully_accepted'], -row['fully_accepted_rate'], row['source']))
+
+    fields = ['gse_ids', 'sra_ids', 'cellxgene_ids', 'github_repos', 'zenodo_data', 'zenodo_code', 'figshare_links', 'other_code_urls']
+    field_totals = {
+        field: {
+            'total_ids': sum(len(_list_value(item, field)) for item in raw_results),
+            'papers_with_field': sum(1 for item in raw_results if _list_value(item, field)),
+        }
+        for field in fields
+    }
+
+    quality_flags: Dict[str, List[Dict[str, Any]]] = {
+        'low_score_fully_accepted': [],
+        'fully_accepted_without_real_data': [],
+        'fully_accepted_without_code': [],
+        'suspicious_github_repos': [],
+        'data_only_with_code': [],
+        'code_only_with_data': [],
+        'inferred_data': [],
+    }
+
+    for idx, item in enumerate(raw_results, start=1):
+        acceptance = item.get('acceptance', 'UNKNOWN')
+        score = item.get('relevance_score') or item.get('benchmark_relevance_score') or 0
+        title = (item.get('title') or item.get('input') or '')[:160]
+        entry = {
+            'index': idx,
+            'source': item.get('source', 'UNKNOWN'),
+            'acceptance': acceptance,
+            'score': score,
+            'title': title,
+            'doi': item.get('doi', ''),
+        }
+        real_data = _real_data_count(item)
+        code = _code_count(item)
+
+        if acceptance == 'FULLY_ACCEPTED':
+            if score <= 5:
+                quality_flags['low_score_fully_accepted'].append(entry)
+            if real_data == 0:
+                quality_flags['fully_accepted_without_real_data'].append(entry)
+            if code == 0:
+                quality_flags['fully_accepted_without_code'].append(entry)
+            suspicious = _suspicious_github_repos(item)
+            if suspicious:
+                flagged = dict(entry)
+                flagged['github_repos'] = suspicious
+                quality_flags['suspicious_github_repos'].append(flagged)
+        elif acceptance == 'DATA_ONLY' and code > 0:
+            quality_flags['data_only_with_code'].append(entry)
+        elif acceptance == 'CODE_ONLY' and real_data > 0:
+            quality_flags['code_only_with_data'].append(entry)
+
+        if 'INFERRED_DATA' in _list_value(item, 'gse_ids'):
+            quality_flags['inferred_data'].append(entry)
+
+    raw_count = len(raw_results)
+    full_count = sum(1 for item in raw_results if item.get('acceptance') == 'FULLY_ACCEPTED')
+    return {
+        'benchmark_type': collected_data.get('benchmark_type', ''),
+        'search_only': search_only,
+        'raw_candidates': raw_count,
+        'filtered_literature_results': len(filtered_results),
+        'filtered_out_no_dataset_count': collected_data.get('filtered_out_no_dataset_count', max(raw_count - len(filtered_results), 0)),
+        'fully_accepted_count': full_count,
+        'fully_accepted_rate': round(full_count / raw_count, 4) if raw_count else 0.0,
+        'accepted_papers_saved': accepted_summary.get('saved_count', 0),
+        'accepted_papers_status': accepted_summary.get('status', 'completed' if accepted_summary else 'unknown'),
+        'source_counts_raw': _counter(raw_results, 'source'),
+        'acceptance_counts_raw': _counter(raw_results, 'acceptance'),
+        'acceptance_counts_filtered': _counter(filtered_results, 'acceptance'),
+        'source_acceptance_counts': source_acceptance,
+        'source_efficiency': source_efficiency,
+        'identifier_totals': field_totals,
+        'quality_flags': quality_flags,
+        'quality_flag_counts': {key: len(value) for key, value in quality_flags.items()},
+    }
+
+
+def save_stage0_quality_report(
+    collected_data: Dict[str, Any],
+    output_dir: Path,
+    accepted_summary: Dict[str, Any] | None = None,
+    search_only: bool = False,
+) -> Dict[str, Any]:
+    """Write machine- and human-readable Stage 0 quality summaries."""
+    summary = build_stage0_quality_summary(collected_data, accepted_summary, search_only=search_only)
+
+    json_path = output_dir / 'stage0_quality_summary.json'
+    json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding='utf-8')
+
+    md_path = output_dir / 'stage0_quality_summary.md'
+    lines = [
+        f"# Stage 0 Quality Summary — {summary.get('benchmark_type', '').title()}",
+        '',
+        f"- Search-only mode: {summary['search_only']}",
+        f"- Raw candidates: {summary['raw_candidates']}",
+        f"- Filtered literature results: {summary['filtered_literature_results']}",
+        f"- Filtered out without dataset accessions: {summary['filtered_out_no_dataset_count']}",
+        f"- FULLY_ACCEPTED: {summary['fully_accepted_count']} ({summary['fully_accepted_rate']:.1%})",
+        f"- Accepted papers saved: {summary['accepted_papers_saved']} ({summary['accepted_papers_status']})",
+        '',
+        '## Source Efficiency',
+        '',
+        '| Source | Total | FULLY_ACCEPTED | Rate | DATA_ONLY | CODE_ONLY | REJECTED |',
+        '|---|---:|---:|---:|---:|---:|---:|',
+    ]
+    for row in summary['source_efficiency']:
+        lines.append(
+            f"| {row['source']} | {row['total']} | {row['fully_accepted']} | "
+            f"{row['fully_accepted_rate']:.1%} | {row['data_only']} | {row['code_only']} | {row['rejected']} |"
+        )
+
+    lines.extend(['', '## Identifier Totals', ''])
+    for field, stats in summary['identifier_totals'].items():
+        lines.append(f"- {field}: {stats['total_ids']} id(s), {stats['papers_with_field']} paper(s)")
+
+    lines.extend(['', '## Quality Flags', ''])
+    for flag, count in summary['quality_flag_counts'].items():
+        lines.append(f"- {flag}: {count}")
+    if summary['quality_flags']['suspicious_github_repos']:
+        lines.extend(['', '### Suspicious GitHub Repo Examples', ''])
+        for item in summary['quality_flags']['suspicious_github_repos'][:10]:
+            repos = ', '.join(item.get('github_repos', []))
+            lines.append(f"- [{item['source']}] {item['title']} → {repos}")
+
+    md_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return summary
 
 
 def save_results(workflow_plan: Dict, collected_data: Dict, output_dir: Path):
