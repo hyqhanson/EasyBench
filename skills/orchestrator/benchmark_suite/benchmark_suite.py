@@ -43,6 +43,11 @@ from orchestrator.reproducibility_evaluation.reproducibility_evaluation import (
 from orchestrator.benchmark_evaluation.benchmark_evaluation import (
     run_benchmark_evaluation,
 )
+from skills.agents.agent_preflight.runner import run_agent_preflight
+from skills.agents.agent_curator.curator_runner import run_agent_curator
+from skills.agents.agent_reproduce.runner import run_agent_reproduce as run_agent_reproduce_v2
+from skills.agents.agent_curator.executor import CurationExecutor
+from skills.agents.agent_curator.validator import validate_curated_h5ad
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -194,13 +199,13 @@ def run_stage_preflight(
     summary: Dict[str, Any],
     use_llm: bool = True,
 ) -> Dict[str, Any]:
-    """Stage 0.5: AgentScanner — match protocol + code + data for each paper.
+    """Stage 1: AgentScanner — match protocol + code + data for each paper.
 
     Reads experimental_protocol.json, scans data/ and benchmark_code/
     directories, and calls the LLM to produce execution_plan.json.
     """
     print(f'\n{"=" * 60}')
-    print(f'  Stage 0.5: Agent Preflight [{benchmark_type}]')
+    print(f'  Stage 1: Agent Preflight [{benchmark_type}]')
     print(f'{"=" * 60}')
 
     data_root = _OMICSCLAW_ROOT / 'benchmark_data'
@@ -210,7 +215,7 @@ def run_stage_preflight(
 
     if not data_dir.exists():
         print(f'  ⚠️  Data dir not found: {data_dir}')
-        summary['stages']['00_agent_preflight'] = {
+        summary['stages']['01_agent_preflight'] = {
             'status': 'skipped', 'reason': 'No data dir',
         }
         save_summary(output_dir, summary)
@@ -225,7 +230,7 @@ def run_stage_preflight(
         use_llm=use_llm,
     )
 
-    summary['stages']['00_agent_preflight'] = {
+    summary['stages']['01_agent_preflight'] = {
         'status': 'completed',
         'total_papers': result.get('total_papers', 0),
         'status_counts': result.get('status_counts', {}),
@@ -241,34 +246,79 @@ def run_stage_curate(
     summary: Dict[str, Any],
     use_llm: bool = False,
 ) -> Dict[str, Any]:
-    """Stage 1: AgentCurator — LLM-driven data format detection & curation plan.
+    """Stage 2: AgentCurator — LLM-driven data format detection & curation plan.
+    Plus AgentCuratorExecutor + AgentCuratorValidator.
 
     Reads execution_plan.json + data file listings for each paper,
-    produces curation_plan.json describing exactly how to convert raw
-    data into standardized AnnData (.h5ad) format.
-
-    This replaces the old ``run_stage_process_data`` hardcoded logic.
+    produces curation_plan.json, executes conversion, and validates.
     """
     print(f'\n{"=" * 60}')
-    print(f'  Stage 1: Agent Curator — Data Format Detection')
+    print(f'  Stage 2: Agent Curator — Detect & Convert & Validate')
     print(f'{"=" * 60}')
 
-    from skills.agents.agent_curator.curator_runner import run_agent_curator
-
+    # 1. LLM detection → curation_plan.json
     result = run_agent_curator(
         benchmark_type=f'{benchmark_type}_{output_dir.name}',
         data_root=data_root,
         use_llm=use_llm,
     )
 
-    summary['stages']['01_agent_curator'] = {
+    # 2. Deterministic execution → curated.h5ad (per paper)
+    data_dir = data_root / f'{benchmark_type}_{output_dir.name}'
+    paper_slugs = [d.name for d in sorted(data_dir.iterdir())
+                   if d.is_dir() and not d.name.startswith('_') and (d / 'curation_plan.json').exists()]
+
+    executor_curated = 0
+    executor_failed = 0
+    for slug in paper_slugs:
+        paper_dir = data_dir / slug
+        ep_file = paper_dir / 'curation_plan.json'
+        if not ep_file.exists():
+            continue
+        try:
+            ep = json.loads(ep_file.read_text(encoding='utf-8'))
+            executor = CurationExecutor(paper_dir=paper_dir, execution_plan=ep)
+            exc_result = executor.run()
+            if exc_result.get('status') == 'completed':
+                executor_curated += 1
+            else:
+                executor_failed += 1
+        except Exception as exc:
+            print(f'  ⚠️  [{slug[:40]}] Executor error: {exc}')
+            executor_failed += 1
+
+    # 3. Anti-hallucination validation (per paper)
+    validated = 0
+    validation_errors = 0
+    for slug in paper_slugs:
+        paper_dir = data_dir / slug
+        curated_file = paper_dir / 'unpacked_data' / 'curated.h5ad'
+        if not curated_file.exists():
+            curated_file = paper_dir / 'curated.h5ad'
+        if not curated_file.exists():
+            continue
+        try:
+            v_result = validate_curated_h5ad(str(curated_file))
+            if v_result.get('valid', False):
+                validated += 1
+            else:
+                validation_errors += 1
+        except Exception as exc:
+            print(f'  ⚠️  [{slug[:40]}] Validator error: {exc}')
+            validation_errors += 1
+
+    summary['stages']['02_agent_curator'] = {
         'status': 'completed',
         'total_papers': result.get('total_papers', 0),
         'papers_with_plan': result.get('papers_with_plan', 0),
-        'papers_with_error': result.get('papers_with_error', 0),
+        'curated': executor_curated,
+        'curated_failed': executor_failed,
+        'validated': validated,
+        'validation_errors': validation_errors,
     }
     save_summary(output_dir, summary)
-    return result
+    return {'curated': executor_curated, 'failed': executor_failed,
+            'validated': validated}
 
 
 def run_stage_reproduce(
@@ -283,16 +333,16 @@ def run_stage_reproduce(
     clone_depth: int,
     summary: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Stage 2: reproduce paper — clone, install, execute, verify.
+    """Stage 4: reproduce paper — clone, install, execute, verify.
 
     Uses agent_reproduce for script-level reproduction (Stage 2a)
     and agent_curator's executor for h5ad→RDS bridge.
     """
-    reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
+    reproduce_dir = stage_dir(output_dir, 4, 'reproduce')
     reproduce_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 2: Reproduce Paper')
+    print(f'  Stage 4: Reproduce Paper')
     print(f'{"=" * 60}')
 
     # Step 1: Old-style reproduce (clone + install) — skip execution, keep for env setup
@@ -356,7 +406,7 @@ def run_stage_reproduce(
         pkg_count = len(ar_result.get('missing_packages', []))
         print(f'  → Score: {score}/100, Missing packages: {pkg_count}')
 
-    summary['stages']['02_reproduce'] = {
+    summary['stages']['04_reproduce'] = {
         'status': 'completed',
         'output_dir': str(reproduce_dir),
         'clone_success': result_statuses.get('clone_success', False),
@@ -384,7 +434,7 @@ def run_stage_process_data(
     summary: Dict[str, Any],
     no_process: bool = False,
 ) -> Dict[str, Any]:
-    """Stage 1: process downloaded datasets through OmicsClaw sc tools.
+    """Stage 3: process downloaded datasets through OmicsClaw sc tools.
 
     Reads paper_metadata.json for each FULLY_ACCEPTED paper in
     benchmark_data/{type}/, discovers data files of all supported formats
@@ -393,17 +443,17 @@ def run_stage_process_data(
         1. sc-standardize-input  → canonical AnnData
         2. sc-preprocessing      → QC + normalize + HVG + PCA
 
-    Output: ``01_process_data/{paper_slug}/{dataset}/standardize/processed.h5ad``
+    Output: ``03_process_data/{paper_slug}/{dataset}/standardize/processed.h5ad``
             and ``.../preprocess/processed.h5ad``
 
-    The benchmark analysis (e.g. sc-batch-integration) runs in Stage 4,
-    not here — Stage 1 only prepares clean, preprocessed data.
+    The benchmark analysis (e.g. sc-batch-integration) runs in Stage 6,
+    not here — Stage 3 only prepares clean, preprocessed data.
     """
-    process_dir = stage_dir(output_dir, 1, 'process_data')
+    process_dir = stage_dir(output_dir, 3, 'process_data')
     process_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 1: Process Downloaded Data')
+    print(f'  Stage 3: Process Downloaded Data')
     print(f'{"=" * 60}')
 
     if no_process:
@@ -768,12 +818,12 @@ def run_stage_evaluate(
     include_suggestions: bool,
     summary: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Stage 3: reproducibility evaluation — compute metrics & generate report."""
-    eval_dir = stage_dir(output_dir, 3, 'reproducibility_evaluation')
+    """Stage 5: reproducibility evaluation — compute metrics & generate report."""
+    eval_dir = stage_dir(output_dir, 5, 'reproducibility_evaluation')
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 3: Reproducibility Evaluation')
+    print(f'  Stage 5: Reproducibility Evaluation')
     print(f'{"=" * 60}')
 
     catalog = load_metrics_catalog(catalog_path)
@@ -816,7 +866,7 @@ def run_stage_evaluate(
     report_path = eval_dir / 'reproducibility_report.md'
     report_path.write_text(report_text)
 
-    summary['stages']['03_reproducibility_evaluation'] = {
+    summary['stages']['05_reproducibility_evaluation'] = {
         'status': 'completed',
         'output_dir': str(eval_dir),
         'result_count': len(evaluated_results),
@@ -836,12 +886,12 @@ def run_stage_benchmark_evaluate(
     summary: Dict[str, Any],
     no_evaluate: bool = False,
 ) -> Dict[str, Any]:
-    """Stage 4: benchmark evaluation — apply benchmark metrics to reproduced data."""
-    eval_dir = stage_dir(output_dir, 4, 'benchmark_evaluation')
+    """Stage 6: benchmark evaluation — apply benchmark metrics to reproduced data."""
+    eval_dir = stage_dir(output_dir, 6, 'benchmark_evaluation')
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 4: Benchmark Evaluation [{benchmark_type}]')
+    print(f'  Stage 6: Benchmark Evaluation [{benchmark_type}]')
     print(f'{"=" * 60}')
 
     if no_evaluate:
@@ -853,8 +903,8 @@ def run_stage_benchmark_evaluate(
         return {'status': 'skipped'}
 
     # Determine input directories from previous stages
-    process_dir = stage_dir(output_dir, 1, 'process_data')
-    reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
+    process_dir = stage_dir(output_dir, 3, 'process_data')
+    reproduce_dir = stage_dir(output_dir, 4, 'reproduce')
 
     catalog_path = (
         _PROJECT_ROOT / 'orchestrator' / 'reproducibility_evaluation' / 'metrics_catalog.json'
@@ -875,7 +925,7 @@ def run_stage_benchmark_evaluate(
         report_text = Path(result['report_path']).read_text()
         save_report(output_dir, report_text)
 
-    summary['stages']['04_benchmark_evaluation'] = {
+    summary['stages']['06_benchmark_evaluation'] = {
         'status': 'completed',
         'output_dir': str(eval_dir),
         'evaluated_count': result.get('summary', {}).get('evaluated_count', 0),
@@ -940,9 +990,7 @@ def run_benchmark_suite(
             search_only=search_only,
         )
         mark_stage_completed(output_dir, 0)
-        # HUMAN CHECKPOINT
-        print(f'\n  🛑 CHECKPOINT: Stage 0 complete. Review artifacts at:')
-        print(f'     {stage_dir(output_dir, 0, "benchmark_dispatch")}')
+        print(f'\n  🛑 CHECKPOINT: Stage 0 (Dispatch) complete.')
         print(f'     Run with --resume to skip to Stage 1.\n')
 
     if search_only:
@@ -962,20 +1010,42 @@ def run_benchmark_suite(
         }
 
     # --- Stage 1: Process downloaded data ---
+    # --- Stage 1: Preflight / AgentScanner ---
     if resume and is_stage_completed(output_dir, 1):
         print(f'  ↪ Stage 1 already completed, resuming at stage 2.')
+    else:
+        data_root = _OMICSCLAW_ROOT / 'benchmark_data'
+        run_stage_preflight(benchmark_type, output_dir, summary, use_llm=use_llm)
+        mark_stage_completed(output_dir, 1)
+        print(f'\n  🛑 CHECKPOINT: Stage 1 (Preflight) complete.')
+        print(f'     Run with --resume to skip to Stage 2.\n')
+
+    # --- Stage 2: Curator (detect + convert + validate) ---
+    if resume and is_stage_completed(output_dir, 2):
+        print(f'  ↪ Stage 2 already completed, resuming at stage 3.')
+    else:
+        data_root = _OMICSCLAW_ROOT / 'benchmark_data'
+        run_stage_curate(
+            benchmark_type, output_dir, data_root, summary, use_llm=use_llm,
+        )
+        mark_stage_completed(output_dir, 2)
+        print(f'\n  🛑 CHECKPOINT: Stage 2 (Curator) complete.')
+        print(f'     Run with --resume to skip to Stage 3.\n')
+
+    # --- Stage 3: Process downloaded data (sc-standardize + sc-preprocessing) ---
+    if resume and is_stage_completed(output_dir, 3):
+        print(f'  ↪ Stage 3 already completed, resuming at stage 4.')
     else:
         run_stage_process_data(
             collected_data, output_dir, summary, no_process=no_process,
         )
-        mark_stage_completed(output_dir, 1)
-        print(f'\n  🛑 CHECKPOINT: Stage 1 complete. Review artifacts at:')
-        print(f'     {stage_dir(output_dir, 1, "process_data")}')
-        print(f'     Run with --resume to skip to Stage 2.\n')
+        mark_stage_completed(output_dir, 3)
+        print(f'\n  🛑 CHECKPOINT: Stage 3 (Process Data) complete.')
+        print(f'     Run with --resume to skip to Stage 4.\n')
 
-    # --- Stage 2: Reproduce Paper ---
-    if resume and is_stage_completed(output_dir, 2):
-        print(f'  ↪ Stage 2 already completed, resuming at stage 3.')
+    # --- Stage 4: Reproduce Paper ---
+    if resume and is_stage_completed(output_dir, 4):
+        print(f'  ↪ Stage 4 already completed, resuming at stage 5.')
     else:
         # Load dispatch results if not already in memory
         if not collected_data:
@@ -999,18 +1069,17 @@ def run_benchmark_suite(
             no_reproduce_clone, no_reproduce_install, no_reproduce_run,
             clone_depth, summary,
         )
-        mark_stage_completed(output_dir, 2)
-        print(f'\n  🛑 CHECKPOINT: Stage 2 complete. Review artifacts at:')
-        print(f'     {stage_dir(output_dir, 2, "reproduce")}')
-        print(f'     Run with --resume to skip to Stage 3.\n')
+        mark_stage_completed(output_dir, 4)
+        print(f'\n  🛑 CHECKPOINT: Stage 4 (Reproduce) complete.')
+        print(f'     Run with --resume to skip to Stage 5.\n')
 
-    # --- Stage 3: Reproducibility Evaluation ---
-    if resume and is_stage_completed(output_dir, 3):
-        print(f'  ↪ Stage 3 already completed.')
+    # --- Stage 5: Reproducibility Evaluation ---
+    if resume and is_stage_completed(output_dir, 5):
+        print(f'  ↪ Stage 5 already completed.')
     else:
         # Load reproduce result from disk if needed
-        if reproduce_result is None and is_stage_completed(output_dir, 2):
-            reproduce_dir = stage_dir(output_dir, 2, 'reproduce')
+        if reproduce_result is None and is_stage_completed(output_dir, 4):
+            reproduce_dir = stage_dir(output_dir, 4, 'reproduce')
             result_file = reproduce_dir / 'reproducibility' / 'result.json'
             if result_file.exists():
                 reproduce_result = {'result': json.loads(result_file.read_text())}
@@ -1022,14 +1091,13 @@ def run_benchmark_suite(
             benchmark_type, reproduce_result,
             output_dir, catalog_path, include_suggestions, summary,
         )
-        mark_stage_completed(output_dir, 3)
-        print(f'\n  🛑 CHECKPOINT: Stage 3 complete. Review artifacts at:')
-        print(f'     {stage_dir(output_dir, 3, "reproducibility_evaluation")}')
-        print(f'     Run with --resume to skip to Stage 4.\n')
+        mark_stage_completed(output_dir, 5)
+        print(f'\n  🛑 CHECKPOINT: Stage 5 (Eval) complete.')
+        print(f'     Run with --resume to skip to Stage 6.\n')
 
-    # --- Stage 4: Benchmark Evaluation ---
-    if resume and is_stage_completed(output_dir, 4):
-        print(f'  ↪ Stage 4 already completed.')
+    # --- Stage 6: Benchmark Evaluation ---
+    if resume and is_stage_completed(output_dir, 6):
+        print(f'  ↪ Stage 6 already completed.')
     else:
         run_stage_benchmark_evaluate(
             benchmark_type=benchmark_type,
@@ -1037,7 +1105,7 @@ def run_benchmark_suite(
             summary=summary,
             no_evaluate=no_evaluate,
         )
-        mark_stage_completed(output_dir, 4)
+        mark_stage_completed(output_dir, 6)
 
     # --- Finalize ---
     summary['completed_at'] = datetime.now(timezone.utc).isoformat()
