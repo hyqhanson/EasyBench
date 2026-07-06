@@ -556,7 +556,7 @@ def _write_outputs(
             'generated_by': 'skills/orchestrator/benchmark_evaluation/benchmark_evaluation.py',
             'evaluations': evaluations,
             'summary': summary,
-        }, indent=2, default=str),
+        }, indent=2, default=str, ensure_ascii=False),
     )
 
     # --- Markdown report ---
@@ -646,7 +646,7 @@ def _write_outputs(
             report_lines.append(f'**Missing metrics**: {", ".join(missing)}')
             report_lines.append('')
 
-    (eval_dir / 'benchmark_report.md').write_text('\n'.join(report_lines) + '\n')
+    (eval_dir / 'benchmark_report.md').write_text('\n'.join(report_lines) + '\n', encoding='utf-8')
 
 
 # ---------------------------------------------------------------------------

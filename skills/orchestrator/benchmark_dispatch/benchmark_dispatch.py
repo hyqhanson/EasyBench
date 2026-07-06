@@ -932,17 +932,38 @@ def save_accepted_papers(
                 except Exception as exc:
                     print(f'    ❌ [{slug}] Generic code download failed {f_url}: {exc}')
 
-        # ── Unpack compressed files after download ──
+        # ── Unpack compressed files after data download ──
         if download_data and data_dir.exists() and any(data_dir.iterdir()):
             try:
                 from literature.core.downloader import unpack_data_files
                 unpack_result = unpack_data_files(str(data_dir))
                 if unpack_result.get('unpacked', 0) > 0:
-                    print(f'    📦 [{slug}] Unpacked {unpack_result["unpacked"]} archive(s)')
+                    print(f'    📦 [{slug}] Unpacked {unpack_result["unpacked"]} archive(s) in data/')
                 metadata['unpacked_files'] = unpack_result
             except Exception as exc:
-                print(f'    ⚠️  [{slug}] Unpack failed: {exc}')
+                print(f'    ⚠️  [{slug}] Unpack data failed: {exc}')
                 metadata['unpacked_files'] = {'error': str(exc)}
+
+        # ── Unpack compressed code files after code download ──
+        if code_bench_dir.exists() and any(code_bench_dir.iterdir()):
+            try:
+                import zipfile, tarfile, shutil
+                archives = list(code_bench_dir.rglob('*.zip')) + list(code_bench_dir.rglob('*.tar.gz')) + list(code_bench_dir.rglob('*.tar'))
+                unpacked_count = 0
+                for a in archives:
+                    try:
+                        dest = a.parent  # extract in-place, not into unpacked_data/
+                        if a.suffix == '.zip' or a.name.endswith('.tar.gz') or a.name.endswith('.tgz'):
+                            with (zipfile.ZipFile(a) if a.suffix == '.zip' else tarfile.open(a, 'r:gz')) as zf:
+                                zf.extractall(path=str(dest))
+                            unpacked_count += 1
+                            print(f'    📦 [{slug}] Unpacked {a.name} ({a.stat().st_size/1e6:.0f}MB) in benchmark_code/')
+                    except Exception as e:
+                        print(f'    ⚠️  [{slug}] Failed to unpack {a.name}: {e}')
+                metadata['unpacked_code'] = {'unpacked': unpacked_count, 'total_archives': len(archives)}
+            except Exception as exc:
+                print(f'    ⚠️  [{slug}] Unpack code failed: {exc}')
+                metadata['unpacked_code'] = {'error': str(exc)}
 
         # ── Fill timestamp and write metadata ──
         from datetime import datetime, timezone

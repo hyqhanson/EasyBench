@@ -1,47 +1,128 @@
 # EasyBench 多 Agent 架构设计方案
 
-> 日期: 2026-06-22
-> 状态: 设计阶段，待评审
+> 最后更新: 2026-07-05
+> 状态: 开发中
 
 ---
 
-## 0. 当前基线
+## 0. 当前基线 (2026-07-05)
 
 ```
-Stage 0   → benchmark_dispatch    (搜索 → 下载数据 → 克隆代码) ✅ 完成
-Stage 1   → process_data           (standardize → preprocess)   ✅ 完成
-Stage 2   → reproduce_paper        (克隆 → 安装 → 运行)        ⚠️ 骨架
-Stage 3   → reproducibility_eval   (评分报告)                  ⚠️ 骨架
-Stage 4   → benchmark_evaluation   (计算指标 → 排名)          ⚠️ 骨架
+Stage 0 → benchmark_dispatch    (搜索 → 下载数据 → 代码自动解压)  ✅ 完成
+Stage 1 → AgentPreflight        (LLM 配型 → execution_plan)       ✅ 完成
+Stage 2 → AgentCurator          (LLM格式检测 → 转换 → 验证)       ✅ 完成
+  ├─ run_agent_curator           LLM 格式检测 → curation_plan.json
+  ├─ CurationExecutor            确定性 h5ad 转换
+  └─ validate_curated_h5ad       反幻觉验证
+Stage 3 → Process Data           (sc-preprocessing → QC+HVG+PCA)  ✅ 重构
+Stage 4 → AgentReproduce        (多入口脚本 + Stitch + Fix)       ✅ 完成
+  ├─ runner.py                   串联/独立执行 + Stitch模式
+  ├─ monitor.py                  错误签名检测
+  ├─ fix.py                      LLM诊断 + 自动安装
+  ├─ extractor.py                knitr 输出解析
+  └─ agent_evaluator.py           LLM多维评分
+Stage 5 → Reproducibility Eval  (可复现性评分)                    ✅ 完成
+Stage 6 → Benchmark Evaluation  (基准指标评测)                    ⚠️ 骨架
 ```
 
-## 1. 新架构：新增 Stage 0.5 + 升级 Stage 2
+## 1. 架构总览：7 阶段 + 6 Agent 流水线
 
+```mermaid
+flowchart TB
+    BM["benchmark-type (e.g. integration)"] --> S0
+    
+    subgraph S0["Stage 0: Dispatch — benchmark_dispatch.py"]
+        D0["搜索 PubMed/arXiv/GitHub/Zenodo"]
+        D1["下载数据 + 代码 → benchmark_data/{type}/"]
+        D2["代码自动解压(zip/tar.gz) → benchmark_code/{type}/"]
+        D3["产出: paper_metadata.json + data/ + code/"]
+    end
+    
+    subgraph S1["Stage 1: AgentPreflight — scanner.py + runner.py"]
+        SCAN["LLM 读取 protocol + code + data"]
+        EP["产出: execution_plan.json<br/>(matched_scripts, entry_point, env)"]
+    end
+    
+    subgraph S2["Stage 2: AgentCurator — curator.py + executor.py + validator.py"]
+        CUR["LLM 检测格式 → curation_plan.json"]
+        EXEC["CurationExecutor: 确定性转换 → curated.h5ad"]
+        VAL["validate_curated_h5ad: 反幻觉验证"]
+    end
+    
+    subgraph S3["Stage 3: Preprocess — benchmark_suite.py"]
+        PRE["读取 Stage 2 的 curated.h5ad"]
+        QC["sc-preprocessing: QC + Normalize + HVG + PCA"]
+        OUT2["产出: processed.h5ad"]
+    end
+    
+    subgraph S4["Stage 4: AgentReproduce — runner.py"]
+        RP["多脚本流水线 (Rmd/R/py)"]
+        STITCH["Stitch模式: 多个Rmd共享一个R会话"]
+        MON["AgentMonitor: 错误签名检测"]
+        FIX["AgentFix: LLM诊断+自动修复"]
+        EVAL["AgentEvaluator: LLM多维评分"]
+    end
+    
+    subgraph S5["Stage 5: Reproducibility Eval"]
+        REPR["评价 clone/install/run 成功率"]
+    end
+    
+    subgraph S6["Stage 6: Benchmark Evaluation"]
+        BENCH["在 processed.h5ad 上运行基准技能"]
+        RANK["iLISI/ASW 等指标 → 排名报告"]
+    end
+    
+    S0 -->|paper_metadata.json| S1
+    S1 -->|execution_plan.json| S2
+    S2 -->|curated.h5ad| S3
+    S2 -->|curated.h5ad| S4
+    S3 -->|processed.h5ad| S6
+    S4 -->|reproduce_result.json| S5
+    S6 -->|benchmark_metrics.json| RANK
 ```
-Stage 0    → benchmark_dispatch         (不变)
-              产出: benchmark_data/ + benchmark_code/
-
-Stage 0.5  → 🆕 agent_preflight         (LLM 配型 + 可行性检查)
-              产出: execution_plan.json
-
-Stage 1    → process_data               (不变，但只处理 ready 论文)
-Stage 2    → 🆕 agent_reproduce         (Monitor + Fix 循环)
-Stage 3    → reproducibility_eval       (不变)
-Stage 4    → benchmark_evaluation       (不变)
+    
+    subgraph S2["Stage 2: AgentReproduce 🆕"]
+        RP["多脚本流水线 (Rmd→knit, .R→Rscript)"]
+        MON["AgentMonitor: 15种错误签名检测"]
+        FIX["AgentFix: 技能库+LLM诊断+自动修复"]
+        EVAL["AgentEvaluator: LLM多维度评分"]
+        EXTR["Extractor: knitr输出解析"]
+        subgraph OUTPUTS["reproduce/ 产出"]
+            M1["manifest.json (引用记录)"]
+            M2["reproduce_result.json (评分+指标)"]
+            M3["*.md (knitr完整输出)"]
+            M4["fix_attempts.json (修复日志)"]
+        end
+    end
+    
+    subgraph S3["Stage 3: reproducibility_eval"]
+        REPR["评价 clone/install/run 成功率"]
+    end
+    
+    subgraph S4["Stage 4: benchmark_evaluation"]
+        BENCH["在 processed.h5ad 上运行 skill"]
+        RANK["iLISI/ASW 等指标 → 排名报告"]
+    end
+    
+    S0 -->|paper_metadata.json| S05
+    S05 -->|execution_plan.json| S1
+    S1 -->|curated.h5ad| S2
+    S1 -->|curated.h5ad| S4
+    S2 -->|reproduce_result.json| S3
+    S4 -->|benchmark_metrics.json| RANK
 ```
-
----
 
 ## 2. Agent 定义
 
-借鉴 AutoSOTA 但适配 EasyBench 的单细胞领域，我们定义 **4 个 Agent**：
-
-| # | Agent | 阶段 | 职责 | 对标 AutoSOTA |
-|---|-------|------|------|--------------|
-| 1 | **AgentScanner** | Stage 0.5 | 配型：protocol + code + data → execution_plan | AgentResource + AgentObjective |
-| 2 | **AgentCurator** | 🆕 Stage 1 | 数据整理：识别格式 + 标准化 → 统一格式 | AgentInit（部分） |
-| 3 | **AgentMonitor** | Stage 2 | 实时观察：死锁/超时/异常检测 | AgentMonitor |
-| 4 | **AgentFix** | Stage 2 | 故障修复：检索优先 → 3 轮修复 → ABORT | AgentFix |
+| # | Agent | 阶段 | 文件 | 职责 |
+|---|-------|------|------|------|
+| 1 | **AgentScanner** | Stage 0.5 | `scanner.py`, `runner.py` | LLM 配型：protocol + code + data → execution_plan |
+| 2 | **AgentCurator** | Stage 1 | `curator.py`, `curator_runner.py` | LLM 格式检测 + 转换策略生成 |
+| 3 | **CurationExecutor** | Stage 1 | `executor.py` | 确定性执行：h5ad 格式转换 + h5ad→RDS桥 |
+| 4 | **CuratorValidator** | Stage 1 | `validator.py` | 反幻觉验证：维度/稀疏度/cross-validation |
+| 5 | **AgentMonitor** | Stage 2 | `monitor.py` | 15种错误签名检测 + 3轮重试递进 |
+| 6 | **AgentFix** | Stage 2 | `fix.py` | 模式匹配 → LLM诊断 → 实际执行安装 |
+| 7 | **AgentEvaluator** | Stage 2b | `agent_evaluator.py` | LLM驱动评分 + benchmark_type感知 |
 
 ### 2.1 AgentScanner — Stage 0.5 的 LLM 驱动配型引擎
 
@@ -74,7 +155,7 @@ Stage 4    → benchmark_evaluation       (不变)
 - 代码仓库中 ≤3 个关键文件的摘要（README.md + 主脚本的前 200 行）
 - data/ 下每个 GSE 目录的文件名列表（不含大小，避免 bias）
 
-**Token 预算**：每篇论文 ≤ 6000 tokens → 6 篇 × 6000 = 36K tokens
+**Token 预算**：每篇论文 ≤ 6000 tokens 
 
 ### 2.2 AgentCurator — Stage 1 的 LLM 驱动数据整理引擎
 
@@ -207,47 +288,38 @@ fix_skill_library.json 预设分类:
 
 ---
 
-## 3. 执行流程
+## 3. 各阶段详细设计
 
-```
-benchmark_suite.py
-  │
-  ├─ Stage 0: dispatch                                    (不变)
-  │
-  ├─ 🆕 Stage 0.5: agent_preflight
-  │   ┌───────────────────────────────────────────────────┐
-  │   │ for each paper:                                    │
-  │   │   AgentScanner.read(protocol + code + data 文件树) │
-  │   │   → execution_plan.json                            │
-  │   │   → 分类: ready / data_missing / code_missing      │
-  │   └───────────────────────────────────────────────────┘
-  │
-  ├─ 🆕 Stage 1: agent_curate (替代旧的 process_data)
-  │   ┌───────────────────────────────────────────────────┐
-  │   │ for each ready paper:                              │
-  │   │   AgentCurator.read(data 文件树 + protocol)        │
-  │   │   → curation_plan.json                             │
-  │   │   → 执行 curation_steps (gunzip → transpose → ...) │
-  │   │   → 输出: data/{gse_id}/curated.h5ad               │
-  │   │   → 不可整理的数据 → 标记 uncuratable               │
-  │   └───────────────────────────────────────────────────┘
-  │
-  └─ 🆕 Stage 2: agent_reproduce
-      ┌───────────────────────────────────────────────────┐
-      │ for each curated paper:                            │
-      │   ┌── Monitor-Fix 循环 ──┐                         │
-      │   │ 1. 启动 reproduce    │                         │
-      │   │ 2. AgentMonitor 观察  │ ← 实时日志流             │
-      │   │ 3. 检测异常 → AgentFix│ ← fix_skill_library    │
-      │   │ 4. 修复 → 重试        │                         │
-      │   │ 5. 最多 3 轮修复      │                         │
-      │   │ 6. 超过 → ABORT       │                         │
-      │   └──────────────────────┘                         │
-      │   → reproduce_result.json （包括复现结果指标）       │
-      └───────────────────────────────────────────────────┘
-```
+### Stage 0: benchmark_dispatch
+- **状态**: ✅ 完成
+- **位置**: `skills/orchestrator/benchmark_dispatch/benchmark_dispatch.py`
+- **功能**: 搜索 → 下载 → 生成 paper_metadata.json
+- **输出目录**: `benchmark_data/{benchmark_type}_{output_name}/{paper_slug}/`
+  - 例如 `benchmark_data/integration_e2e_test/autoinhibitory-feedback-.../`
 
----
+### Stage 0.5: AgentScanner
+- **状态**: ✅ 完成
+- **位置**: `skills/agents/agent_preflight/scanner.py`, `runner.py`
+- **功能**: LLM 读取 experimental_protocol.json + 扫描 data/ + code/ → execution_plan.json
+- **关键产出**: matched_data, matched_scripts, entry_point, env_guess
+- **增强**: scanner.py 新增 `script_list` → LLM 能看到完整 .R/.py/.Rmd 路径列表
+
+### Stage 1: AgentCurator
+- **状态**: ✅ 完成（有已知 bug）
+- **位置**: `skills/agents/agent_curator/`
+- **三层流水线**:
+  1. `curator.py` — LLM 格式检测 → curation_plan.json
+  2. `executor.py` — 确定性转换 → curated.h5ad + h5ad→RDS桥
+  3. `validator.py` — 反幻觉验证
+- **已知 bug**:
+  - `same file` 冲突（fuzzy-match 路径创建 .tmp 目录仍有遗留）
+  - `TOO_FEW_GENES` 阈值 2 仍过于严格
+  - `.CEL`/`.BGX`/`.RDS` 格式转换未实现
+  - CS 前缀 10X mtx 大内存问题
+
+### Stage 2: AgentReproduce（核心创新）
+- **状态**: ✅ 完成
+- **位置**: `skills/agents/agent_reproduce/runner.py`
 
 ## 4. 产出文件
 
@@ -295,7 +367,7 @@ benchmark_data/{type}/
 | 3 | `AgentMonitor` 实时日志观察器 | `skills/orchestrator/agent_reproduce/monitor.py` | 2 h |
 | 4 | `AgentFix` 检索→修复循环 | `skills/orchestrator/agent_reproduce/fix.py` | 1.5 h |
 | 5 | 集成到 `benchmark_suite.py` | 修改主流水线 | 1 h |
-| 6 | 端到端测试（6 篇论文） | 运行验证 | 1 h |
+| 6 | 端到端测试 | 运行验证 | 1 h |
 
 ---
 

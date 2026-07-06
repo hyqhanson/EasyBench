@@ -85,6 +85,7 @@ def run_agent_reproduce(
     total_scripts = len(target_scripts)
 
     # Stitch: run all Rmd scripts sharing the same repo_dir in one R session
+    # (only Rmd/Rmarkdown benefit from stitching; .R/.py are standalone)
     rmd_targets = [t for t in target_scripts if Path(t["script_name"]).suffix.lower() in ('.rmd', '.rmarkdown')]
 
     if len(rmd_targets) >= 2:
@@ -262,14 +263,13 @@ def _pick_entry_scripts(matched_scripts: Dict[str, Any], entry_point: str) -> Li
     """Pick ALL scripts to run in dependency order.
 
     Returns ordered list of dicts with {"script_name", "language", "purpose"}.
-    Only returns actual executable scripts (Rmd, R, py), not helper files.
+    Accepts Rmd, R, and py scripts as entry points.
     """
-    EXECUTABLE_EXTS = {'.rmd', '.rmarkdown'}
+    EXECUTABLE_EXTS = {'.rmd', '.rmarkdown', '.r', '.rdata', '.py'}
     entry_scripts = []
     other_scripts = []
 
     for name, info in matched_scripts.items():
-        # Only Rmd/Rmarkdown files are entry points; .R helpers are sourced
         ext = Path(name).suffix.lower()
         if ext not in EXECUTABLE_EXTS:
             continue
