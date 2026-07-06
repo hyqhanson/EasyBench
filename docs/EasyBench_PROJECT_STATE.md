@@ -78,50 +78,56 @@ your-email@fudan.edu.cn
 
 ---
 
-## 4. 流水线架构（6 个 Stage + 4 个 Agent）
+## 4. 流水线架构（7 个 Stage + 6 个 Agent + Processor）
 
 ```
 benchmark-type (e.g. "integration")
   │
   ├── Stage 0:   benchmark_dispatch         [benchmark_dispatch.py]
   │              搜索 PubMed/arXiv/GitHub/Zenodo/Scholar → 提取含数据的论文
-  │              产出: 00_benchmark_dispatch/literature/ + paper_metadata.json + data/
+  │              自动解压代码(.zip/.tar.gz) → benchmark_code/{type}/
+  │              产出: paper_metadata.json + data/ + benchmark_code/
   │
-  ├── Stage 0.5: agent_preflight (AgentScanner)  [skills/agents/agent_preflight/]  ← 🆕
+  ├── Stage 1:   agent_preflight (AgentScanner) [skills/agents/agent_preflight/]
   │              LLM 配型: protocol + code + data → execution_plan.json
-  │              读取 experimental_protocol.json, 扫描 data/ + benchmark_code/,
-  │              LLM 判断格式兼容性、数据充足性、可行分析路线
-  │              产出: execution_plan.json (含 matched_data, matched_scripts, entry_point)
+  │              产出: execution_plan.json → output_dir/01_preflight/{slug}/
   │
-  ├── Stage 1:   agent_curator (AgentCurator) [skills/agents/agent_curator/]  ← 🆕
+  ├── Stage 2:   agent_curator (AgentCurator) [skills/agents/agent_curator/]
   │              三层流水线:
   │                1. AgentCurator.curate()      — LLM 格式检测 → curation_plan.json
   │                2. CurationExecutor.run()     — 确定性转换 → curated.h5ad
   │                3. CuratorValidator.validate()— 反幻觉验证
-  │              支持格式: 10X mtx(含GSM前缀), h5ad, h5, CSV/TSV, RDS, CEL, BGX
-  │              产出: curated.h5ad + curation_plan.json
+  │              产出: curated.h5ad + output_dir/02_curator/{slug}/curation_plan.json
   │
-  ├── Stage 2:   reproduce_paper              [reproduce_paper.py]
-  │              仓库发现 + 克隆 + 环境安装 + 论文特定命令 + 输出验证
-  │              产出: 02_reproduce/reproducibility/{plan,result,report}
+  ├── Stage 3:   processor (AgentProcessor)  [skills/processor/processor.py]  ← 🆕
+  │              轻量 scanpy 预处理: QC → Normalize → HVG → PCA
+  │              无 OmicsClaw skill 依赖，跳过 preflight gating
+  │              自动降采样(>100K cells)、跳过极小/artifact数据集
+  │              产出: output_dir/03_process_data/{slug}/{dataset_id}.processed.h5ad
   │
-  ├── Stage 3:   reproducibility_evaluation
-  │              评估复现成功率（clone/install/run/verify），建议缺失指标
-  │              产出: 03_reproducibility_evaluation/
+  ├── Stage 4:   reproduce (AgentReproduce)  [skills/agents/agent_reproduce/]
+  │              多入口脚本(Rmd/R/py) + Stitch模式 + Monitor+Fix
+  │              产出: reproduce_result.json (含 LLM 评分)
   │
-  └── Stage 4:   benchmark_evaluation
+  ├── Stage 5:   reproducibility_evaluation  [reproducibility_evaluation.py]
+  │              评估复现成功率, 建议缺失指标
+  │
+  └── Stage 6:   benchmark_evaluation        [benchmark_evaluation.py]
                  autoagent evaluator 计算生物学指标 → 排名 → 报告
-                 产出: 04_benchmark_evaluation/benchmark_metrics.json + report.md
 ```
 
-### Agent 定义
+### Agent/Processor 定义
 
-| # | Agent | 阶段 | 文件 | 职责 |
-|---|-------|------|------|------|
-| 1 | AgentScanner | Stage 0.5 | `scanner.py`, `runner.py` | 配型：protocol + code + data → execution_plan |
-| 2 | AgentCurator | Stage 1 | `curator.py`, `curator_runner.py` | LLM 驱动格式检测 + 转换策略生成 |
-| 3 | CurationExecutor | Stage 1 | `executor.py` | 确定性执行：h5ad 格式转换 |
-| 4 | CuratorValidator | Stage 1 | `validator.py` | 反幻觉验证：维度/稀疏度/cross-validation |
+| # | 名称 | 阶段 | 文件 | 类型 |
+|---|------|------|------|------|
+| 1 | AgentScanner | Stage 1 | `scanner.py`, `runner.py` | Agent (LLM) |
+| 2 | AgentCurator | Stage 2 | `curator.py`, `curator_runner.py` | Agent (LLM) |
+| 3 | CurationExecutor | Stage 2 | `executor.py` | 确定性执行 |
+| 4 | CuratorValidator | Stage 2 | `validator.py` | 确定性验证 |
+| 5 | AgentMonitor | Stage 4 | `monitor.py` | 错误签名检测 |
+| 6 | AgentFix | Stage 4 | `fix.py` | LLM诊断+自动修复 |
+| 7 | AgentEvaluator | Stage 4 | `agent_evaluator.py` | LLM评分 |
+| 8 | **Processor** | **Stage 3** | **`processor.py`** | **纯 scanpy** |
 
 ---
 
@@ -134,22 +140,23 @@ benchmark-type (e.g. "integration")
 | `skills/literature/core/downloader.py` | 下载器（GEO/SRA/Zenodo/cellxgene + 代理绕过 + BioProject解析） | ✅ 重写 |
 | `skills/literature/core/llm_collector.py` | LLM 文献收集器（DeepSeek 驱动） | ✅ 稳定 |
 | `skills/literature/core/search.py` | PubMed API 封装 + 全文抓取 | ✅ 稳定 |
-| `skills/literature/core/steps.py` | 论文方法/代码段提取 | ✅ 稳定 |
-| `skills/orchestrator/benchmark_dispatch/benchmark_dispatch.py` | Stage 0：数据收集调度 + Zenodo下载 + 数据自发现 | ✅ 增强 |
-| `skills/orchestrator/reproduce_paper/reproduce_paper.py` | Stage 2：论文复现 | ✅ 稳定 |
-| `skills/orchestrator/benchmark_suite/benchmark_suite.py` | 5 阶段管道编排器 + checkpoint 恢复 | ✅ 重写 (Stage 1) |
-| `skills/orchestrator/reproducibility_evaluation/reproducibility_evaluation.py` | Stage 3：可复现性评价 | ✅ 稳定 |
-| `skills/orchestrator/reproducibility_evaluation/metrics_catalog.json` | 指标目录 | ✅ 稳定 |
-| `skills/orchestrator/benchmark_evaluation/benchmark_evaluation.py` | Stage 4：benchmark 评价 | ⚠️ 骨架 |
+| `skills/orchestrator/benchmark_dispatch/benchmark_dispatch.py` | Stage 0：数据收集调度 + 代码自动解压 | ✅ 增强 |
+| `skills/orchestrator/benchmark_suite/benchmark_suite.py` | 7 阶段管道编排器 + checkpoint 恢复 | ✅ 重写 |
+| `skills/orchestrator/reproducibility_evaluation/reproducibility_evaluation.py` | Stage 5：可复现性评价 | ✅ 稳定 |
+| `skills/orchestrator/benchmark_evaluation/benchmark_evaluation.py` | Stage 6：benchmark 评价 | ⚠️ 骨架 |
 | **`skills/agents/agent_preflight/scanner.py`** | **AgentScanner — LLM protocol-code-data 配型** | ✅ **新增** |
 | **`skills/agents/agent_preflight/runner.py`** | **AgentScanner 批处理 runner** | ✅ **新增** |
 | **`skills/agents/agent_curator/curator.py`** | **AgentCurator — LLM 格式检测 + curation_plan** | ✅ **新增** |
 | **`skills/agents/agent_curator/curator_runner.py`** | **AgentCurator 批处理 runner** | ✅ **新增** |
 | **`skills/agents/agent_curator/executor.py`** | **CurationExecutor — 确定性 h5ad 转换** | ✅ **新增** |
 | **`skills/agents/agent_curator/validator.py`** | **CuratorValidator — 反幻觉验证** | ✅ **新增** |
+| **`skills/agents/agent_reproduce/runner.py`** | **AgentReproduce — 多入口脚本 + Stitch + Fix** | ✅ **新增** |
+| **`skills/agents/agent_reproduce/monitor.py`** | **AgentMonitor — 错误签名检测** | ✅ **新增** |
+| **`skills/agents/agent_reproduce/fix.py`** | **AgentFix — LLM诊断+自动安装** | ✅ **新增** |
+| **`skills/processor/processor.py`** | **Processor — 轻量 scanpy 预处理 (Stage 3)** | ✅ **新增** |
 | `omicsclaw.py` | `oc run benchmark-suite` 入口 | ✅ 已集成 |
-| `_run_full_preflight.py` | 独立运行 Stage 0.5 AgentScanner | ✅ 新增 |
-| `_run_full_curator.py` | 独立运行 Stage 1 AgentCurator | ✅ 新增 |
+| `_run_full_preflight.py` | 独立运行 Stage 1 AgentScanner | ✅ 新增 |
+| `_run_full_curator.py` | 独立运行 Stage 2 AgentCurator | ✅ 新增 |
 | `ATTRIBUTION.md` | 项目归属声明 | ✅ 已创建 |
 | `README.md` | 项目文档 | ✅ 已重写 |
 
@@ -196,18 +203,21 @@ benchmark-type (e.g. "integration")
 ### ✅ 可以正常工作
 
 ```bash
-# 全流水线（需要 DeepSeek API key）
+# 全新运行（从 Stage 0 开始到 Stage 6）
+python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --use-llm
+
 # 只跑 Stage 0（搜索+下载），跳过后续所有
-python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --use-llm --no-process --no-reproduce-clone --no-reproduce-install --no-reproduce-run --no-evaluate
+python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --use-llm --no-process --no-evaluate
 
-# 用 --resume 跳过已完成的 Stage 0，只跑 Stage 0.5+1+2
-python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --resume --no-evaluate
-
-# 用 --resume 跳过已完成的 Stage 0-2，只跑 Stage 3+4
-python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --resume
+# 用 --resume 跳过已完成的 Stage 0，只跑 Stage 1+2
+python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --resume --use-llm --no-process --no-evaluate
 
 # 只想重新跑 Stage 2（删除 checkpoint_02 后 resume）
-Remove-Item .checkpoint_02 -Force
+Remove-Item e2e_test/.checkpoint_02 -Force
+python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --resume --use-llm
+
+# 只想跑 Stage 3（预处理）
+Remove-Item e2e_test/.checkpoint_03 -Force
 python -m skills.orchestrator.benchmark_suite.benchmark_suite --benchmark-type integration --output ./e2e_test --resume
 ```
 
