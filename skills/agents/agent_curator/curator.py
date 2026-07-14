@@ -467,20 +467,20 @@ _BENCHMARK_OBS_RULES = {
     "integration": {
         "required": ["batch"],
         "column_hints": [
-            # (column_name_pattern, llm_role_description)
-            ("batch", "batch identifier for multi-sample integration"),
-            ("sample", "sample/patient identifier"),
-            ("donor", "donor/patient identifier"),
-            ("orig.ident", "Seurat original identity (often experiment/sample)"),
-            ("replicate", "biological replicate identifier"),
-            ("experiment", "experiment or run identifier"),
-            ("group", "experimental group/condition identifier"),
-            ("condition", "experimental condition"),
-            ("perturbation", "perturbation/treatment group"),
-            ("genotype", "genetic background or genotype"),
-            ("tissue", "tissue of origin"),
-            ("patient", "patient identifier"),
-            ("subject", "subject/patient identifier"),
+            # (column_name_pattern, llm_role_description, rename_to)
+            ("batch", "batch identifier for multi-sample integration", "batch"),
+            ("sample", "sample / patient / donor identifier (if only one column identifies separate samples, rename to batch)", "batch"),
+            ("donor", "donor/patient identifier", "batch"),
+            ("orig.ident", "Seurat original identity (often experiment/sample)", "batch"),
+            ("replicate", "biological replicate identifier", "batch"),
+            ("experiment", "experiment or run identifier", "batch"),
+            ("group", "experimental group/condition identifier (if multiple groups, this is batch)", "batch"),
+            ("condition", "experimental condition", "batch"),
+            ("perturbation", "perturbation/treatment group", "batch"),
+            ("genotype", "genetic background or genotype", "batch"),
+            ("tissue", "tissue of origin (if multiple tissues, this is batch)", "batch"),
+            ("patient", "patient identifier", "batch"),
+            ("subject", "subject/patient identifier", "batch"),
         ],
     },
 }
@@ -528,17 +528,19 @@ def normalize_curated_for_benchmark(
 The dataset has these obs columns:
 {col_list}
 
-We need to identify columns that should be renamed to match standard names.
+We need to identify columns that should be renamed to standard names for benchmark.
 Required standard names: {required}
 
+CRITICAL RULE: If the dataset has ONLY ONE column that identifies separate batches/samples/donors (e.g. 'sample', 'donor_id', 'orig.ident', etc.), that column IS the batch column. Rename it to 'batch'.
+
 Common column patterns and their standard names:
-{chr(10).join(f'  "{pattern}" → could be "{desc}"' for pattern, desc in hints)}
+{chr(10).join(f'  "{pattern}" → rename to "{std}" ({desc})' for pattern, desc, std in hints)}
 
 For each required standard name, find the best matching column in the dataset.
 Return a JSON object with:
 {{"mapping": {{"original_name": "standard_name", ...}}, "reason": "brief explanation"}}
 
-If no column matches a required name, omit it.
+If no column matches a required name, return empty mapping with a reason.
 Return ONLY valid JSON, no markdown fences.
 """
         raw = _call_llm(prompt, temperature=0.05)
