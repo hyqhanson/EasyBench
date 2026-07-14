@@ -49,6 +49,7 @@ from skills.agents.agent_curator.executor import CurationExecutor
 from skills.agents.agent_curator.validator import validate_curated_h5ad
 from skills.agents.agent_reproduce.runner import run_agent_reproduce as run_agent_reproduce_v2
 from skills.processor.processor import run_processor
+from skills.evaluator.evaluator import run_benchmark as run_benchmark_evaluation
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -907,13 +908,15 @@ def run_benchmark_suite(
     if resume and is_stage_completed(output_dir, 6):
         print(f'  ↪ Stage 6 already completed.')
     else:
-        run_stage_benchmark_evaluate(
-            benchmark_type=benchmark_type,
-            output_dir=output_dir,
-            summary=summary,
-            no_evaluate=no_evaluate,
-        )
-        mark_stage_completed(output_dir, 6)
+        process_dir = output_dir / '03_process_data'
+        eval_out = output_dir / '06_benchmark_evaluation'
+        if process_dir.exists():
+            run_benchmark_evaluation(
+                benchmark_type=summary.get('metadata', {}).get('benchmark_type', benchmark_type),
+                input_dir=process_dir,
+                output_dir=eval_out,
+            )
+            mark_stage_completed(output_dir, 6)
 
     # --- Finalize ---
     summary['completed_at'] = datetime.now(timezone.utc).isoformat()

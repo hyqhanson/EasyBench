@@ -2,22 +2,40 @@
 
 Reads curated.h5ad from Stage 2, runs QC + normalize + HVG + PCA,
 writes processed.h5ad to a specified output directory.
+
+For "integration" benchmark type, also runs multiple integration
+methods (Harmony, BBKNN, Scanorama, etc.) and saves per-method results.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import scanpy as sc
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# Benchmark-type specific imports (lazy)
+_INTEGRATION_METHODS: Optional[List[str]] = None
+
+
+def _get_integration_methods() -> List[str]:
+    global _INTEGRATION_METHODS
+    if _INTEGRATION_METHODS is None:
+        try:
+            from skills.processor.integration.methods import DEFAULT_METHODS
+            _INTEGRATION_METHODS = DEFAULT_METHODS
+        except ImportError:
+            _INTEGRATION_METHODS = ["none"]
+    return _INTEGRATION_METHODS
 
 
 def preprocess_scanpy(
@@ -119,26 +137,55 @@ def run_processor(
             logger.info("Loading: %s", h5_path)
             adata = sc.read_h5ad(str(h5_path))
 
+            # Step 1: Basic QC + preprocessing
             adata = preprocess_scanpy(adata)
             if adata is None:
                 logger.warning("Skipped: %s (below quality thresholds)", h5_path)
                 continue
 
-            # Use dataset folder name to avoid overwrite
+            # Step 2: Run integration methods if benchmark type is integration
             dataset_id = h5_path.parent.name if h5_path.parent.name != "unpacked_data" else "dataset"
-            out_path = paper_out / f"{dataset_id}.processed.h5ad"
-            adata.write_h5ad(str(out_path))
-            n_hvg = int(adata.var.highly_variable.sum()) if "highly_variable" in adata.var.columns else 0
-            n_pcs = int(adata.obsm["X_pca"].shape[1]) if "X_pca" in adata.obsm else 0
-            results.append({
-                "paper": paper_path.name,
-                "n_cells": int(adata.n_obs),
-                "n_genes": int(adata.n_vars),
-                "n_hvg": n_hvg,
-                "n_pcs": n_pcs,
-                "output": str(out_path),
-            })
-            logger.info("Saved: %s (%d cells, %d HVGs)", out_path, adata.n_obs, n_hvg)
+            paper_out.mkdir(parents=True, exist_ok=True)
+
+            if "integration" in benchmark_type or "integration" == benchmark_type.split("_")[0]:
+                from skills.processor.integration.methods import run_all_methods
+
+                # Detect batch_key
+                batch_key = "batch"
+                for candidate in ["batch", "sample", "donor", "orig.ident", "replicate"]:
+                    if candidate in adata.obs.columns and adata.obs[candidate].nunique() >= 2:
+                        batch_key = candidate
+                        break
+
+                methods = _get_integration_methods()
+                integration_results = run_all_methods(adata, batch_key=batch_key, methods=methods)
+
+                for method, result in integration_results.items():
+                    integrated_adata = result["adata"]
+                    out_path = paper_out / f"{dataset_id}.{method}.processed.h5ad"
+                    integrated_adata.write_h5ad(str(out_path))
+                    logger.info("  [%s] Saved: %s (%d cells)", method, out_path, integrated_adata.n_obs)
+                    results.append({
+                        "paper": paper_path.name,
+                        "method": method,
+                        "n_cells": int(integrated_adata.n_obs),
+                        "n_genes": int(integrated_adata.n_vars),
+                        "n_hvg": int(integrated_adata.var.highly_variable.sum()) if "highly_variable" in integrated_adata.var.columns else 0,
+                        "output": str(out_path),
+                    })
+            else:
+                # Single method — save as processed.h5ad
+                out_path = paper_out / f"{dataset_id}.processed.h5ad"
+                adata.write_h5ad(str(out_path))
+                n_hvg = int(adata.var.highly_variable.sum()) if "highly_variable" in adata.var.columns else 0
+                results.append({
+                    "paper": paper_path.name,
+                    "n_cells": int(adata.n_obs),
+                    "n_genes": int(adata.n_vars),
+                    "n_hvg": n_hvg,
+                    "output": str(out_path),
+                })
+                logger.info("Saved: %s (%d cells, %d HVGs)", out_path, adata.n_obs, n_hvg)
 
     summary_path = output_dir / "_processor_summary.json"
     summary_path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")

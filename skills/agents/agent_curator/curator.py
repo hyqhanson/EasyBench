@@ -457,3 +457,116 @@ Rules:
     def _now_iso() -> str:
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Benchmark normalization — standardize obs columns across papers
+# ---------------------------------------------------------------------------
+
+_BENCHMARK_OBS_RULES = {
+    "integration": {
+        "required": ["batch"],
+        "column_hints": [
+            # (column_name_pattern, llm_role_description)
+            ("batch", "batch identifier for multi-sample integration"),
+            ("sample", "sample/patient identifier"),
+            ("donor", "donor/patient identifier"),
+            ("orig.ident", "Seurat original identity (often experiment/sample)"),
+            ("replicate", "biological replicate identifier"),
+            ("experiment", "experiment or run identifier"),
+            ("group", "experimental group/condition identifier"),
+            ("condition", "experimental condition"),
+            ("perturbation", "perturbation/treatment group"),
+            ("genotype", "genetic background or genotype"),
+            ("tissue", "tissue of origin"),
+            ("patient", "patient identifier"),
+            ("subject", "subject/patient identifier"),
+        ],
+    },
+}
+
+
+def normalize_curated_for_benchmark(
+    paper_dir: Path,
+    benchmark_type: str = "integration",
+) -> Dict[str, Any]:
+    """Post-curation step: rename obs columns to standard names for benchmark.
+
+    Scans curated.h5ad files, uses LLM to identify batch/cell_type columns,
+    and renames them. Also writes a ``_benchmark_obs_map.json`` recording
+    the mapping for downstream processing.
+
+    This runs AFTER CurationExecutor, BEFORE Stage 3 Processor.
+    """
+    if benchmark_type not in _BENCHMARK_OBS_RULES:
+        return {"paper": paper_dir.name, "status": "no_rules", "mappings": []}
+
+    rules = _BENCHMARK_OBS_RULES[benchmark_type]
+    mappings = []
+
+    for h5_path in sorted(paper_dir.rglob("curated.h5ad")):
+        if "._" in str(h5_path) or "_tmp" in str(h5_path):
+            continue
+        logger.info("Benchmark-normalizing: %s", h5_path)
+
+        try:
+            import scanpy as sc
+            adata = sc.read_h5ad(str(h5_path), backed="r")
+            obs_cols = list(adata.obs.columns)
+            del adata  # close backed file
+        except Exception as exc:
+            logger.warning("Cannot read %s: %s", h5_path, exc)
+            continue
+
+        # Build prompt: list obs columns, ask LLM to map
+        col_list = "\n".join(f"  - {c}" for c in obs_cols)
+        required = rules["required"]
+        hints = rules["column_hints"]
+
+        prompt = f"""You are standardizing single-cell metadata columns for a {benchmark_type} benchmark.
+
+The dataset has these obs columns:
+{col_list}
+
+We need to identify columns that should be renamed to match standard names.
+Required standard names: {required}
+
+Common column patterns and their standard names:
+{chr(10).join(f'  "{pattern}" → could be "{desc}"' for pattern, desc in hints)}
+
+For each required standard name, find the best matching column in the dataset.
+Return a JSON object with:
+{{"mapping": {{"original_name": "standard_name", ...}}, "reason": "brief explanation"}}
+
+If no column matches a required name, omit it.
+Return ONLY valid JSON, no markdown fences.
+"""
+        raw = _call_llm(prompt, temperature=0.05)
+        result = _parse_llm_json(raw) if raw else None
+
+        if result and "mapping" in result:
+            # Apply rename using h5ad backed mode + rewrite
+            rename_map = result["mapping"]
+            logger.info("  Renaming: %s", rename_map)
+            try:
+                adata = sc.read_h5ad(str(h5_path))
+                for orig, std in rename_map.items():
+                    if orig in adata.obs.columns and orig != std:
+                        adata.obs[std] = adata.obs[orig].copy()
+                        if std not in _BENCHMARK_OBS_RULES.get(benchmark_type, {}).get("required", []):
+                            adata.obs.drop(columns=[orig], inplace=True)
+                adata.write_h5ad(str(h5_path))
+                del adata
+                mappings.append({
+                    "file": str(h5_path),
+                    "mapping": rename_map,
+                })
+            except Exception as exc:
+                logger.warning("  Rename failed: %s", exc)
+        else:
+            logger.warning("  LLM returned no valid mapping for %s", h5_path)
+
+    result = {"paper": paper_dir.name, "status": "completed", "mappings": mappings}
+    out_path = paper_dir / "_benchmark_obs_map.json"
+    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    return result

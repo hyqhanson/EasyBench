@@ -70,6 +70,16 @@ def run_agent_curator(
         ds_count = len(plan.get("datasets", []))
         uncuratable = len(plan.get("uncuratable", []))
 
+        # ── Phase 1.5: Benchmark normalization (if execute and curated.h5ad exists) ──
+        if execute and not has_error:
+            from .curator import normalize_curated_for_benchmark
+            bm_type = benchmark_type.split("_")[0] if "_" in benchmark_type else benchmark_type
+            norm_result = normalize_curated_for_benchmark(paper_path, benchmark_type=bm_type)
+            if norm_result.get("status") == "completed" and norm_result.get("mappings"):
+                print(f"  📋 [{paper_path.name[:45]}] Benchmark obs standardized")
+                for m in norm_result.get("mappings", []):
+                    print(f"     {m.get('mapping', {})}")
+
         # ── Phase 2: Execute ──
         exec_result = None
         if execute and not has_error:
