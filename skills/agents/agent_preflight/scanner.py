@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -25,39 +25,195 @@ logger = logging.getLogger(__name__)
 _MAX_FILE_TREE_DEPTH = 5
 _MAX_FILES_PER_DIR = 50
 _MAX_KEY_FILE_BYTES = 4096
+_MAX_SCRIPTS_PER_REPO = 60
+_MAX_PROMPT_SCRIPTS_PER_REPO = 40
+_MAX_PROMPT_SCRIPT_DIRS_PER_REPO = 40
 
 _SCRIPT_EXTS = {'.py', '.R', '.r', '.sh', '.bash', '.ipynb', '.rmd', '.Rmd'}
 _KEY_FILENAMES = {'readme.md', 'makefile', 'dockerfile', 'environment.yml',
                   'requirements.txt', 'setup.py', 'run.sh', 'run.py',
                   'main.R', 'main.py', 'snakemake', 'nextflow.config'}
+_IGNORED_CODE_DIRS = {
+    '.git', '.snakemake', '__pycache__', '.pytest_cache', 'node_modules',
+}
+
+
+def _top_level_module(relative_path: str) -> str:
+    parts = Path(relative_path).parts
+    return parts[0] if len(parts) > 1 else '(repo root)'
+
+
+def _round_robin(groups: Dict[str, List[str]], limit: int) -> List[str]:
+    """Take items evenly from named groups without domain-specific ranking."""
+    selected: List[str] = []
+    group_names = sorted(groups, key=str.lower)
+    index = 0
+    while len(selected) < limit:
+        added = False
+        for name in group_names:
+            items = groups[name]
+            if index < len(items):
+                selected.append(items[index])
+                added = True
+                if len(selected) == limit:
+                    break
+        if not added:
+            break
+        index += 1
+    return selected
+
+
+def _select_balanced_paths(
+    relative_paths: Sequence[str],
+    limit: int,
+) -> List[str]:
+    """Sample scripts across modules and directories instead of global truncation."""
+    by_module: Dict[str, Dict[str, List[str]]] = {}
+    for path in dict.fromkeys(relative_paths):
+        module = _top_level_module(path)
+        directory = str(Path(path).parent)
+        by_module.setdefault(module, {}).setdefault(directory, []).append(path)
+
+    module_queues: Dict[str, List[str]] = {}
+    for module, directories in by_module.items():
+        for paths in directories.values():
+            paths.sort(key=str.lower)
+        module_queues[module] = _round_robin(directories, limit)
+    return _round_robin(module_queues, limit)
+
+
+def _script_directory_inventory(script_paths: Sequence[str]) -> List[Dict[str, Any]]:
+    """Summarize every script-bearing directory with representative filenames."""
+    directories: Dict[str, List[str]] = {}
+    for path in dict.fromkeys(script_paths):
+        directories.setdefault(str(Path(path).parent), []).append(path)
+    for paths in directories.values():
+        paths.sort(key=str.lower)
+
+    balanced_dirs = _round_robin(
+        {
+            module: sorted(
+                [directory for directory in directories if _top_level_module(directory) == module],
+                key=str.lower,
+            )
+            for module in {_top_level_module(directory) for directory in directories}
+        },
+        _MAX_PROMPT_SCRIPT_DIRS_PER_REPO,
+    )
+    return [
+        {
+            'path': directory,
+            'script_count': len(directories[directory]),
+            'examples': directories[directory][:2],
+        }
+        for directory in balanced_dirs
+    ]
+
+
+def _repo_scripts(repo_root: Path) -> List[str]:
+    """List real scripts while ignoring VCS/runtime cache paths."""
+    scripts = []
+    for path in repo_root.rglob('*'):
+        rel = path.relative_to(repo_root)
+        if path.is_symlink() or any(part.lower() in _IGNORED_CODE_DIRS for part in rel.parts):
+            continue
+        try:
+            if path.is_file() and path.suffix.lower() in _SCRIPT_EXTS:
+                scripts.append(str(rel))
+        except OSError:
+            continue
+    return sorted(scripts)
 
 
 def _build_file_tree(root: Path, depth: int = 0) -> Dict[str, Any]:
-    """Build a lightweight directory tree (no file contents beyond names/sizes)."""
+    """Build a lightweight directory tree (no file contents beyond names/sizes).
+
+    Broken symlinks and vanished paths are recorded as leaf stubs instead of
+    raising, so paper clones with author-machine absolute links still scan.
+    """
     if depth > _MAX_FILE_TREE_DEPTH:
         return {"name": root.name, "type": "dir", "truncated": True, "children": []}
-    if root.is_file():
-        return {"name": root.name, "type": "file", "size_bytes": root.stat().st_size,
-                "extension": root.suffix.lower()}
+
+    try:
+        if root.is_symlink():
+            try:
+                target = str(root.readlink())
+            except OSError:
+                target = ""
+            return {
+                "name": root.name,
+                "type": "symlink",
+                "error": "broken_symlink" if not root.exists() else "symlink_skipped",
+                "target": target,
+                "children": [],
+            }
+    except OSError:
+        return {"name": root.name, "type": "unknown", "error": "os_error", "children": []}
+
+    try:
+        if root.is_file():
+            return {
+                "name": root.name,
+                "type": "file",
+                "size_bytes": root.stat().st_size,
+                "extension": root.suffix.lower(),
+            }
+    except OSError as exc:
+        return {
+            "name": root.name,
+            "type": "file",
+            "error": type(exc).__name__,
+            "children": [],
+        }
+
+    if not root.is_dir():
+        return {
+            "name": root.name,
+            "type": "other",
+            "error": "not_a_directory",
+            "children": [],
+        }
+
+    if depth > 0 and root.name.lower() in _IGNORED_CODE_DIRS:
+        return {
+            "name": root.name,
+            "type": "dir",
+            "skipped": True,
+            "children": [],
+        }
+
     children = []
     total_size = 0
     try:
-        entries = sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-    except PermissionError:
-        return {"name": root.name, "type": "dir", "error": "permission_denied", "children": []}
+        entries = sorted(
+            root.iterdir(),
+            key=lambda p: (p.is_file(), p.name.lower()),
+        )
+    except (PermissionError, FileNotFoundError, NotADirectoryError, OSError) as exc:
+        err = (
+            "permission_denied"
+            if isinstance(exc, PermissionError)
+            else type(exc).__name__.lower()
+        )
+        return {"name": root.name, "type": "dir", "error": err, "children": []}
     for entry in entries[:_MAX_FILES_PER_DIR]:
         child = _build_file_tree(entry, depth + 1)
         children.append(child)
         total_size += child.get("size_total", child.get("size_bytes", 0))
-    return {"name": root.name, "type": "dir", "children": children, "size_total": total_size,
-            "file_count": sum(1 for c in children if c.get("type") == "file")}
+    return {
+        "name": root.name,
+        "type": "dir",
+        "children": children,
+        "size_total": total_size,
+        "file_count": sum(1 for c in children if c.get("type") == "file"),
+    }
 
 
 def _find_key_files(repo_root: Path) -> List[Dict[str, Any]]:
     """Find README / Makefile / main scripts in a code repository root."""
     key_files = []
     for path in repo_root.rglob("*"):
-        if not path.is_file(): continue
+        if path.is_symlink() or not path.is_file(): continue
         name_lower = path.name.lower()
         is_key = name_lower in _KEY_FILENAMES or path.suffix.lower() in _SCRIPT_EXTS
         if not is_key: continue
@@ -293,15 +449,22 @@ class AgentScanner:
         if not self.code_dir.exists(): return {"error": "code_dir_not_found"}
         repos = []
         for entry in sorted(self.code_dir.iterdir()):
-            if not entry.is_dir(): continue
-            repos.append({"repo_name": entry.name, "has_git": (entry / ".git").exists(),
-                          "file_tree": _build_file_tree(entry),
-                          "key_files": _find_key_files(entry),
-                          # Include a flat summary of all .Rmd/.py/.R files with their paths
-                          # so LLM can see the full analysis pipeline structure
-                          "script_list": [str(f.relative_to(entry)) for f in sorted(entry.rglob("*"))
-                                         if f.is_file() and f.suffix.lower() in ('.r', '.py', '.rmd', '.ipynb')
-                                         and '.git' not in str(f.relative_to(entry))][:30]})
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            all_scripts = _repo_scripts(entry)
+            selected_scripts = _select_balanced_paths(
+                all_scripts,
+                _MAX_SCRIPTS_PER_REPO,
+            )
+            repos.append({
+                "repo_name": entry.name,
+                "has_git": (entry / ".git").exists(),
+                "file_tree": _build_file_tree(entry),
+                "key_files": _find_key_files(entry),
+                "script_count": len(all_scripts),
+                "script_list": selected_scripts,
+                "script_directories": _script_directory_inventory(all_scripts),
+            })
         return {"repos": repos, "repo_count": len(repos)}
 
     def _build_prompt(self, protocol, data_summary, code_summary) -> str:
@@ -341,22 +504,36 @@ class AgentScanner:
         cr = code_summary.get("repos", [])
         cb = []
         for repo in cr[:3]:
-            kn = [kf["name"] for kf in repo.get("key_files", [])[:8]]
-            cb.append(f"- {repo['repo_name']}: {kn}")
+            key_paths = [kf["path"] for kf in repo.get("key_files", [])[:8]]
+            cb.append(
+                f"- Repository {repo['repo_name']}: "
+                f"{repo.get('script_count', len(repo.get('script_list', [])))} scripts"
+            )
+            script_dirs = repo.get("script_directories", [])
+            if script_dirs:
+                cb.append("    Script directory inventory (these paths exist on disk):")
+                for directory in script_dirs:
+                    examples = ", ".join(directory.get("examples", []))
+                    cb.append(
+                        f"      {directory['path']}: {directory['script_count']} script(s); "
+                        f"examples: {examples}"
+                    )
+            if key_paths:
+                cb.append(f"    Prioritized key files: {key_paths}")
             # Include content preview for key scripts so LLM can understand them
-            for kf in repo.get("key_files", [])[:5]:
+            for kf in repo.get("key_files", [])[:8]:
                 preview = kf.get("content_preview", "")
                 if len(preview) > 50:
-                    cb.append(f"    [{kf['name']}] preview:")
+                    cb.append(f"    [{kf['path']}] preview:")
                     for line in preview.split("\n")[:40]:
                         stripped = line.strip()
                         if stripped:
                             cb.append(f"      {stripped[:120]}")
-            # Include the full script list (paths only) so LLM sees the pipeline structure
+            # Paths are sampled across modules and directories before this final cap.
             sl = repo.get("script_list", [])
             if sl:
-                cb.append(f"    All scripts ({len(sl)} files):")
-                for s in sl[:20]:
+                cb.append(f"    Representative scripts ({len(sl)} selected):")
+                for s in sl[:_MAX_PROMPT_SCRIPTS_PER_REPO]:
                     cb.append(f"      {s}")
         code_str = "\n".join(cb) or "(no code repos found)"
         return f"""You are an expert single-cell bioinformatics pipeline planner.
@@ -420,6 +597,11 @@ Return a JSON object (execution_plan) with these keys:
 }}
 
 Rules:
+- Use the protocol, data formats, README previews, and repository structure to
+  determine the workflow; do not favor a method merely because of its name.
+- Script paths are representative samples, while the script-directory inventory
+  is deterministic evidence of which code directories exist on disk.
+- Never claim an inventoried directory is absent or not provided.
 - The ONLY truly blocked case is when there is NO data AND NO code.
 - Everything else gets a practical path — data needs conversion = suggest how,
   code is incomplete = specify what's missing and what CAN still be done.
