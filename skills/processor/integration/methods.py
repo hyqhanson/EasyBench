@@ -58,8 +58,10 @@ def run_no_integration(adata, batch_key: str = "batch", **kwargs) -> Integration
 
 def run_harmony(adata, batch_key: str = "batch", **kwargs) -> IntegrationResult:
     """Harmony batch correction via harmonypy."""
-    if not _check_dep("harmonypy"):
-        raise ImportError("harmonypy not installed.")
+    try:
+        import harmonypy
+    except ImportError:
+        raise ImportError("harmonypy not installed. Run: pip install harmonypy")
 
     logger.info("Harmony integration on %d batches", adata.obs[batch_key].nunique())
 
@@ -74,8 +76,13 @@ def run_harmony(adata, batch_key: str = "batch", **kwargs) -> IntegrationResult:
         theta=kwargs.get("theta", 2.0),
         nclust=kwargs.get("n_clusters", 50),
     )
-    adata.obsm["X_harmony"] = ho.Z_corr.T
-    sc.pp.neighbors(adata, use_rep="X_harmony", n_pcs=ho.Z_corr.shape[0])
+    # ho.Z_corr has shape (n_cells, n_components)
+    Z = np.asarray(ho.Z_corr)
+    logger.debug("Harmony Z_corr shape: %s", Z.shape)
+    if Z.ndim == 1:
+        Z = Z.reshape(-1, 1)
+    adata.obsm["X_harmony"] = Z
+    sc.pp.neighbors(adata, use_rep="X_harmony", n_pcs=Z.shape[1])
     sc.tl.umap(adata)
     return {"method": "harmony", "embedding_key": "X_harmony", "adata": adata}
 
@@ -86,8 +93,10 @@ def run_harmony(adata, batch_key: str = "batch", **kwargs) -> IntegrationResult:
 
 def run_bbknn(adata, batch_key: str = "batch", **kwargs) -> IntegrationResult:
     """BBKNN — batch-balanced k-nearest neighbors."""
-    if not _check_dep("bbknn"):
-        raise ImportError("bbknn not installed.")
+    try:
+        import bbknn
+    except ImportError:
+        raise ImportError("bbknn not installed. Run: pip install bbknn")
 
     logger.info("BBKNN on %d batches", adata.obs[batch_key].nunique())
     if "X_pca" not in adata.obsm:
@@ -109,15 +118,38 @@ def run_scanorama(adata, batch_key: str = "batch", **kwargs) -> IntegrationResul
         raise ImportError("scanorama not installed. Run: pip install scanorama")
 
     logger.info("Scanorama on %d batches", adata.obs[batch_key].nunique())
-    # Split by batch
-    batches = {}
-    for b in adata.obs[batch_key].unique():
-        subset = adata[adata.obs[batch_key] == b].copy()
-        sc.pp.filter_genes(subset, min_cells=1)
-        batches[b] = subset
+    batches = [adata[adata.obs[batch_key] == b].copy() for b in adata.obs[batch_key].unique()]
+    batches = [s for s in batches if s.n_obs >= 2]
+    if len(batches) < 2:
+        raise ValueError("Need at least 2 batches with >= 2 cells each")
 
-    corrected = scanorama.correct_scanpy(list(batches.values()), return_dimred=True)
-    adata.obsm["X_scanorama"] = corrected[0]  # merged corrected embedding
+    # Track original cell ordering
+    orig_cell_ids = adata.obs_names.values
+    corrected = scanorama.correct_scanpy(batches, return_dimred=True)
+    corrected_embedding = corrected[0]  # (n_cells_merged, n_components)
+
+    # Scanorama returns cells in the order of the input batches.
+    # Build a mapping from corrected index -> original cell id.
+    all_cells = []
+    for b in batches:
+        all_cells.extend(b.obs_names.values)
+    corrected_ids = np.array(all_cells)
+
+    # Determine which subset of original cells are present in the output
+    matched, orig_idx, corr_idx = np.intersect1d(
+        orig_cell_ids, corrected_ids, return_indices=True
+    )
+
+    # Initialize embedding with NaN, then fill matched
+    full_emb = np.full((adata.n_obs, corrected_embedding.shape[1]), np.nan)
+    full_emb[orig_idx] = corrected_embedding[corr_idx]
+
+    # Fill remaining NaN with PCA (fallback)
+    pca_emb = adata.obsm.get("X_pca", np.zeros((adata.n_obs, full_emb.shape[1])))
+    nan_rows = np.isnan(full_emb).any(axis=1)
+    full_emb[nan_rows] = pca_emb[nan_rows, :full_emb.shape[1]]
+
+    adata.obsm["X_scanorama"] = full_emb
     sc.pp.neighbors(adata, use_rep="X_scanorama")
     sc.tl.umap(adata)
     return {"method": "scanorama", "embedding_key": "X_scanorama", "adata": adata}
@@ -166,7 +198,10 @@ if _check_dep("harmonypy"):
 if _check_dep("bbknn"):
     _AVAILABLE_METHODS.append("bbknn")
 
-DEFAULT_METHODS = ["none", "scanorama"] if "scanorama" in _AVAILABLE_METHODS else ["none", "mnn_ingest"]
+DEFAULT_METHODS = ["none", "mnn_ingest"]
+for _m in ("scanorama", "harmony", "bbknn"):
+    if _m in _AVAILABLE_METHODS:
+        DEFAULT_METHODS.append(_m)
 
 
 def run_all_methods(adata, batch_key: str = "batch", methods: Optional[List[str]] = None) -> Dict[str, IntegrationResult]:

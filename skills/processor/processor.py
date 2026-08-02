@@ -24,18 +24,38 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Benchmark-type specific imports (lazy)
-_INTEGRATION_METHODS: Optional[List[str]] = None
+_registry = None
+_healer = None
 
 
-def _get_integration_methods() -> List[str]:
-    global _INTEGRATION_METHODS
-    if _INTEGRATION_METHODS is None:
+def _get_registry():
+    global _registry
+    if _registry is None:
         try:
-            from skills.processor.integration.methods import DEFAULT_METHODS
-            _INTEGRATION_METHODS = DEFAULT_METHODS
+            from skills.processor.registry import MethodRegistry
+            _registry = MethodRegistry()
         except ImportError:
-            _INTEGRATION_METHODS = ["none"]
-    return _INTEGRATION_METHODS
+            _registry = None
+    return _registry
+
+
+def _get_healer():
+    global _healer
+    if _healer is None:
+        try:
+            from skills.processor.registry import SelfHealAgent
+            _healer = SelfHealAgent()
+        except ImportError:
+            _healer = None
+    return _healer
+
+
+def _detect_batch_key(adata) -> str:
+    """Auto-detect the batch column in adata.obs."""
+    for candidate in ["batch", "sample", "donor", "orig.ident", "replicate", "Study_name", "LibraryID"]:
+        if candidate in adata.obs.columns and adata.obs[candidate].nunique() >= 2:
+            return candidate
+    return "batch"
 
 
 def preprocess_scanpy(
@@ -148,17 +168,16 @@ def run_processor(
             paper_out.mkdir(parents=True, exist_ok=True)
 
             if "integration" in benchmark_type or "integration" == benchmark_type.split("_")[0]:
-                from skills.processor.integration.methods import run_all_methods
+                # ── Use registry to discover methods for this benchmark type ──
+                base_type = benchmark_type.split("_")[0]  # "integration_e2e_test2" → "integration"
+                reg = _get_registry()
+                methods = reg.available_method_names(base_type) if reg else ["none"]
 
                 # Detect batch_key
-                batch_key = "batch"
-                for candidate in ["batch", "sample", "donor", "orig.ident", "replicate"]:
-                    if candidate in adata.obs.columns and adata.obs[candidate].nunique() >= 2:
-                        batch_key = candidate
-                        break
-
-                methods = _get_integration_methods()
-                integration_results = run_all_methods(adata, batch_key=batch_key, methods=methods)
+                batch_key = _detect_batch_key(adata)
+                integration_results = reg.dispatch(
+                    adata, base_type, batch_key=batch_key, methods=methods
+                ) if reg else {}
 
                 for method, result in integration_results.items():
                     integrated_adata = result["adata"]

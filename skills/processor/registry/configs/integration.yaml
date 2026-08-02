@@ -1,0 +1,57 @@
+# Integration benchmark methods registry
+# Each method defines: name, import test, install cmd, validator
+
+methods:
+  - name: none
+    module: skills.processor.integration.methods
+    import_test: "true"   # always available
+    validator: "True"
+    description: "Baseline PCA + UMAP without any batch correction"
+
+  - name: mnn_ingest
+    module: skills.processor.integration.methods
+    import_test: "true"   # scanpy built-in
+    validator: "'X_ingest' in adata.obsm"
+    validator_code: |
+      def validate(adata, batch_key):
+          return "X_ingest" in adata.obsm
+    description: "MNN-based correction using scanpy's ingest (no R required)"
+
+  - name: scanorama
+    module: skills.processor.integration.methods
+    import_test: "scanorama"
+    install: "pip install scanorama"
+    validator: "'X_scanorama' in adata.obsm"
+    validator_code: |
+      def validate(adata, batch_key):
+          if "X_scanorama" not in adata.obsm:
+              return False
+          emb = adata.obsm["X_scanorama"]
+          return emb.shape[0] == adata.n_obs and emb.ndim >= 2
+    description: "Panoramic stitching — correct_scanpy with dimension reduction"
+    known_failures:
+      - pattern: "positional indexers are out-of-bounds"
+        fix_hint: "Scanorama corrected embedding shape mismatch; try on un-subsampled data or fix row index alignment"
+
+  - name: harmony
+    module: skills.processor.integration.methods
+    import_test: "harmonypy"
+    install: "pip install harmonypy"
+    validator: "'X_harmony' in adata.obsm and adata.obsm['X_harmony'].shape[0] == adata.n_obs"
+    validator_code: |
+      def validate(adata, batch_key):
+          if "X_harmony" not in adata.obsm:
+              return False
+          emb = adata.obsm["X_harmony"]
+          return emb.shape[0] == adata.n_obs and emb.ndim >= 2
+    description: "Harmony batch correction via harmonypy (PyTorch backend)"
+
+  - name: bbknn
+    module: skills.processor.integration.methods
+    import_test: "bbknn"
+    install: "pip install bbknn"
+    validator: "'X_pca' in adata.obsm and adata.obsp.get('connectivities') is not None"
+    validator_code: |
+      def validate(adata, batch_key):
+          return "X_pca" in adata.obsm and adata.obsp is not None and "connectivities" in adata.obsp
+    description: "BBKNN — batch-balanced k-nearest neighbors graph"

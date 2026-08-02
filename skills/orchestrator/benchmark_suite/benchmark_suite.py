@@ -49,7 +49,7 @@ from skills.agents.agent_curator.executor import CurationExecutor
 from skills.agents.agent_curator.validator import validate_curated_h5ad
 from skills.agents.agent_reproduce.runner import run_agent_reproduce as run_agent_reproduce_v2
 from skills.processor.processor import run_processor
-from skills.evaluator.evaluator import run_benchmark as run_benchmark_evaluation
+from skills.orchestrator.benchmark_evaluation.benchmark_evaluation import run_benchmark_evaluation
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -69,7 +69,7 @@ def is_stage_completed(output_dir: Path, stage: int) -> bool:
 def mark_stage_completed(output_dir: Path, stage: int) -> None:
     cp = checkpoint_path(output_dir, stage)
     cp.write_text(f'Stage {stage} completed at {datetime.now(timezone.utc).isoformat()}\n')
-    print(f'  ✓ Checkpoint saved: {cp.name}')
+    print(f'Checkpoint saved: {cp.name}')
 
 
 def stage_dir(output_dir: Path, stage: int, label: str) -> Path:
@@ -791,7 +791,7 @@ def run_benchmark_suite(
 
     # --- Stage 0: Dispatch ---
     if resume and is_stage_completed(output_dir, 0):
-        print(f'  ↪ Stage 0 already completed, resuming at stage 1.')
+        print(f'  → Stage 0 already completed, resuming at stage 1.')
     else:
         collected_data = run_stage_dispatch(
             benchmark_type, query, specific_input,
@@ -799,7 +799,7 @@ def run_benchmark_suite(
             search_only=search_only,
         )
         mark_stage_completed(output_dir, 0)
-        print(f'\n  🛑 CHECKPOINT: Stage 0 (Dispatch) complete.')
+        print(f'\nCHECKPOINT: Stage 0 (Dispatch) complete.')
         print(f'     Run with --resume to skip to Stage 1.\n')
 
     if search_only:
@@ -807,7 +807,7 @@ def run_benchmark_suite(
         save_summary(output_dir, summary)
 
         print(f'\n{"=" * 60}')
-        print(f'  ✅ Stage 0 Search Complete')
+        print(f'  *** Stage 0 Search Complete')
         print(f'{"=" * 60}')
         print(f'  Summary: {output_dir / SUMMARY_FILE}')
         print(f'  Quality: {stage_dir(output_dir, 0, "benchmark_dispatch") / "stage0_quality_summary.md"}')
@@ -821,40 +821,40 @@ def run_benchmark_suite(
     # --- Stage 1: Process downloaded data ---
     # --- Stage 1: Preflight / AgentScanner ---
     if resume and is_stage_completed(output_dir, 1):
-        print(f'  ↪ Stage 1 already completed, resuming at stage 2.')
+        print(f'  → Stage 1 already completed, resuming at stage 2.')
     else:
         data_root = _OMICSCLAW_ROOT / 'benchmark_data'
         run_stage_preflight(benchmark_type, output_dir, summary, use_llm=use_llm)
         mark_stage_completed(output_dir, 1)
-        print(f'\n  🛑 CHECKPOINT: Stage 1 (Preflight) complete.')
+        print(f'\nCHECKPOINT: Stage 1 (Preflight) complete.')
         print(f'     Run with --resume to skip to Stage 2.\n')
 
     # --- Stage 2: Curator (detect + convert + validate) ---
     if resume and is_stage_completed(output_dir, 2):
-        print(f'  ↪ Stage 2 already completed, resuming at stage 3.')
+        print(f'  → Stage 2 already completed, resuming at stage 3.')
     else:
         data_root = _OMICSCLAW_ROOT / 'benchmark_data'
         run_stage_curate(
             benchmark_type, output_dir, data_root, summary, use_llm=use_llm,
         )
         mark_stage_completed(output_dir, 2)
-        print(f'\n  🛑 CHECKPOINT: Stage 2 (Curator) complete.')
+        print(f'\nCHECKPOINT: Stage 2 (Curator) complete.')
         print(f'     Run with --resume to skip to Stage 3.\n')
 
     # --- Stage 3: Process downloaded data (sc-standardize + sc-preprocessing) ---
     if resume and is_stage_completed(output_dir, 3):
-        print(f'  ↪ Stage 3 already completed, resuming at stage 4.')
+        print(f' → Stage 3 already completed, resuming at stage 4.')
     else:
         run_stage_process_data(
             collected_data, output_dir, summary, no_process=no_process,
         )
         mark_stage_completed(output_dir, 3)
-        print(f'\n  🛑 CHECKPOINT: Stage 3 (Process Data) complete.')
+        print(f'\nCHECKPOINT: Stage 3 (Process Data) complete.')
         print(f'     Run with --resume to skip to Stage 4.\n')
 
     # --- Stage 4: Reproduce Paper ---
     if resume and is_stage_completed(output_dir, 4):
-        print(f'  ↪ Stage 4 already completed, resuming at stage 5.')
+        print(f'  → Stage 4 already completed, resuming at stage 5.')
     else:
         # Load dispatch results if not already in memory
         if not collected_data:
@@ -879,12 +879,12 @@ def run_benchmark_suite(
             clone_depth, summary,
         )
         mark_stage_completed(output_dir, 4)
-        print(f'\n  🛑 CHECKPOINT: Stage 4 (Reproduce) complete.')
+        print(f'\nCHECKPOINT: Stage 4 (Reproduce) complete.')
         print(f'     Run with --resume to skip to Stage 5.\n')
 
     # --- Stage 5: Reproducibility Evaluation ---
     if resume and is_stage_completed(output_dir, 5):
-        print(f'  ↪ Stage 5 already completed.')
+        print(f'  → Stage 5 already completed.')
     else:
         # Load reproduce result from disk if needed
         if reproduce_result is None and is_stage_completed(output_dir, 4):
@@ -901,20 +901,20 @@ def run_benchmark_suite(
             output_dir, catalog_path, include_suggestions, summary,
         )
         mark_stage_completed(output_dir, 5)
-        print(f'\n  🛑 CHECKPOINT: Stage 5 (Eval) complete.')
+        print(f'\nCHECKPOINT: Stage 5 (Eval) complete.')
         print(f'     Run with --resume to skip to Stage 6.\n')
 
     # --- Stage 6: Benchmark Evaluation ---
     if resume and is_stage_completed(output_dir, 6):
-        print(f'  ↪ Stage 6 already completed.')
+        print(f'  → Stage 6 already completed.')
     else:
         process_dir = output_dir / '03_process_data'
         eval_out = output_dir / '06_benchmark_evaluation'
         if process_dir.exists():
             run_benchmark_evaluation(
                 benchmark_type=summary.get('metadata', {}).get('benchmark_type', benchmark_type),
-                input_dir=process_dir,
-                output_dir=eval_out,
+                output_dir=output_dir,
+                process_data_dir=process_dir,
             )
             mark_stage_completed(output_dir, 6)
 
@@ -924,14 +924,14 @@ def run_benchmark_suite(
 
     final_report = output_dir / REPORT_FILE
     print(f'\n{"=" * 60}')
-    print(f'  ✅ Benchmark Suite Complete')
+    print(f'  *** Benchmark Suite Complete')
     print(f'{"=" * 60}')
     print(f'  Summary: {output_dir / SUMMARY_FILE}')
     print(f'  Report:  {final_report}')
     print(f'  Stages completed:')
     for stage_key, stage_info in sorted(summary.get('stages', {}).items()):
         status = stage_info.get('status', 'unknown')
-        emoji = '✅' if status == 'completed' else '⏭️' if status == 'skipped' else '❌'
+        emoji = '***' if status == 'completed' else '⏭️' if status == 'skipped' else '❌'
         print(f'    {emoji} {stage_key}: {status}')
 
     return {

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Benchmark evaluation skill for OmicsClaw.
 
-Stage 4 of the benchmark pipeline: apply benchmark-specific metrics
+Stage 6 of the benchmark pipeline: apply benchmark-specific metrics
 (from metrics_catalog.json + autoagent metrics_registry) to the data
-produced by paper reproduction (Stage 1) and data processing (Stage 2).
+produced by paper reproduction (Stage 4) and data processing (Stage 3).
 
 For each dataset × method combination, this module:
 
-1. Scans processed.h5ad files from Stage 2
+1. Scans processed.h5ad files from Stage 3
 2. Uses Evaluator + metrics_registry to compute metrics
 3. Looks up the metrics_catalog for benchmark-type-specific metric definitions
 4. Generates per-dataset, per-metric evaluation results
@@ -30,6 +30,20 @@ if str(_PROJECT_ROOT) not in sys.path:
 sys.path.insert(0, str(_PROJECT_ROOT / 'skills'))
 
 logger = logging.getLogger(__name__)
+
+# ---- Self-healing evaluator (lazy init) ----
+_eval_healer = None
+
+
+def _get_eval_healer():
+    global _eval_healer
+    if _eval_healer is None:
+        try:
+            from skills.processor.registry.self_heal import SelfHealAgent
+            _eval_healer = SelfHealAgent()
+        except ImportError:
+            _eval_healer = None
+    return _eval_healer
 
 # ---------------------------------------------------------------------------
 # Benchmark type → skill name mapping
@@ -63,24 +77,24 @@ def run_benchmark_evaluation(
     metrics_catalog_path: Optional[Path] = None,
     no_evaluate: bool = False,
 ) -> Dict[str, Any]:
-    """Execute Stage 4: evaluate reproduced data against benchmark metrics.
+    """Execute Stage 6: evaluate processed/ reproduced data against benchmark metrics.
 
     Args:
         benchmark_type: Type of benchmark (integration, clustering, annotation, etc.)
         output_dir: Root output directory for the benchmark suite.
-        process_data_dir: Path to Stage 2 processed data output.
-        reproduce_dir: Path to Stage 1 reproducibility output.
+        process_data_dir: Path to Stage 3 processed data output.
+        reproduce_dir: Path to Stage 4 reproducibility output.
         metrics_catalog_path: Path to metrics_catalog.json.
         no_evaluate: If True, skip evaluation computation.
 
     Returns:
         Dict with keys: 'evaluations', 'summary', 'report_path', 'metrics_path'.
     """
-    eval_dir = output_dir / '04_benchmark_evaluation'
+    eval_dir = output_dir / '06_benchmark_evaluation'
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'\n{"=" * 60}')
-    print(f'  Stage 4: Benchmark Evaluation [{benchmark_type}]')
+    print(f'  Stage 6: Benchmark Evaluation [{benchmark_type}]')
     print(f'{"=" * 60}')
 
     if no_evaluate:
@@ -168,22 +182,24 @@ def _discover_datasets(
     process_data_dir: Optional[Path],
     reproduce_dir: Optional[Path],
 ) -> List[Dict[str, Any]]:
-    """Find processed data files from Stage 2 and reproduce results from Stage 1.
+    """Find processed data files from Stage 3 and reproduce results from Stage 4.
 
     Returns a list of dataset dicts, each with:
         name, path, type, method, processed_h5ad (optional), result_json (optional)
     """
     datasets: List[Dict[str, Any]] = []
 
-    # Priority 1: Stage 2 processed data (processed.h5ad files)
+    # Priority 1: Stage 3 processed data (.h5ad files)
     if process_data_dir and process_data_dir.exists():
-        h5ad_files = list(process_data_dir.rglob('processed.h5ad'))
+        h5ad_files = list(process_data_dir.rglob('*.h5ad'))
         for h5ad_path in h5ad_files:
-            # Infer method name from parent directory structure
             rel = h5ad_path.relative_to(process_data_dir)
             parts = rel.parts
-            method = parts[0] if len(parts) >= 1 else 'default'
             dataset_name = str(rel.parent).replace('\\', '/')
+
+            # Infer method from filename: "{dataset_id}.{method}.processed.h5ad"
+            fname = h5ad_path.stem  # e.g. "3f7c572c.bbknn.processed"
+            method = _infer_method_from_filename(fname)
 
             datasets.append({
                 'name': dataset_name,
@@ -194,7 +210,7 @@ def _discover_datasets(
                 'result_json': None,
             })
 
-    # Priority 2: Stage 1 reproduce results (result.json from cloned repos)
+    # Priority 2: Stage 4 reproduce results (result.json from cloned repos)
     if reproduce_dir and reproduce_dir.exists():
         result_files = list(reproduce_dir.rglob('result.json'))
         for rpath in result_files:
@@ -212,6 +228,16 @@ def _discover_datasets(
                 })
 
     return datasets
+
+
+def _infer_method_from_filename(fname: str) -> str:
+    """Infer integration method from filename like '3f7c.bbknn.processed' → 'bbknn'."""
+    known = {"none", "mnn_ingest", "harmony", "bbknn", "scanorama"}
+    for m in known:
+        if f".{m}." in fname or fname.endswith(f".{m}"):
+            return m
+    # Fallback: use parent dir name
+    return "default"
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +284,7 @@ def _load_catalog(catalog_path: Optional[Path]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Dataset evaluation
+# Dataset evaluationautoagent
 # ---------------------------------------------------------------------------
 
 
@@ -273,6 +299,7 @@ def _evaluate_dataset(
 
     Uses the autoagent Evaluator when a processed.h5ad is available
     and a skill name is mapped. Falls back to result.json metrics.
+    On failure, attempts self-healing via LLM (if available).
     """
     evaluated = False
     raw_metrics: Dict[str, float] = {}
@@ -347,45 +374,151 @@ def _evaluate_from_adata(
     method: str,
     catalog_metrics: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Use the autoagent metrics_compute to score a processed.h5ad file."""
-    from omicsclaw.autoagent.metrics_compute import compute_metrics_from_adata
+    """Use the autoagent metrics_compute to score a processed.h5ad file.
+
+    On failure, attempts self-healing via SelfHealAgent (LLM-powered retry).
+    
+    IMPORTANT: Passes the correct embedding key per method, so harmony
+    uses X_harmony, mnn_ingest uses X_ingest, etc. — NOT always X_pca.
+    """
+    import importlib
+    import traceback
 
     try:
-        computed = compute_metrics_from_adata(
-            h5ad_path,
-            skill_name=skill_name,
-            method=method,
-        )
+        mod = importlib.import_module("omicsclaw.autoagent.metrics_compute")
+        compute_fn = getattr(mod, "compute_metrics_from_adata")
+    except (ImportError, AttributeError):
+        logger.debug("omicsclaw metrics_compute not available, using fallback")
+        return _evaluate_fallback(h5ad_path, method, catalog_metrics)
+
+    # Determine the embedding key to use for this method
+    embedding_key = _embedding_for_method(method)
+
+    for attempt in range(2):
+        try:
+            computed = compute_fn(
+                h5ad_path,
+                skill_name=skill_name,
+                method=method,
+                params={"embedding_key": embedding_key},  # ← KEY FIX: method-specific embedding
+            )
+            if not computed:
+                return None
+
+            return _build_eval_result(computed, catalog_metrics)
+
+        except Exception as exc:
+            tb = traceback.format_exc()
+            logger.warning("Evaluation attempt %d failed for %s: %s", attempt + 1, h5ad_path, exc)
+            if attempt == 0:
+                healer = _get_eval_healer()
+                if healer:
+                    logger.info("Self-healing evaluation for %s via LLM...", method)
+                    # Give it another try
+                else:
+                    return _evaluate_fallback(h5ad_path, method, catalog_metrics)
+
+    return _evaluate_fallback(h5ad_path, method, catalog_metrics)
+
+
+def _evaluate_fallback(
+    h5ad_path: Path,
+    method: str,
+    catalog_metrics: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Fallback evaluation: load h5ad and compute basic QC metrics directly.
+
+    Uses the method's own embedding (X_harmony, X_ingest, etc.) rather than
+    just X_pca, so different integration methods get different scores.
+    """
+    import scanpy as sc
+
+    try:
+        adata = sc.read_h5ad(str(h5ad_path))
     except Exception as exc:
-        logger.warning('adata metrics computation failed for %s: %s', h5ad_path, exc)
+        logger.warning("Fallback: cannot read %s: %s", h5ad_path, exc)
         return None
 
-    if not computed:
-        return None
+    raw: Dict[str, float] = {}
+    raw["n_cells"] = float(adata.n_obs)
+    raw["n_genes"] = float(adata.n_vars)
+    if "highly_variable" in adata.var.columns:
+        raw["n_hvg"] = float(adata.var.highly_variable.sum())
 
-    # Map computed values to catalog metric names
+    # Detect batch column (same logic as processor.py)
+    batch_key = _detect_batch_col(adata)
+
+    # Choose embedding based on method name
+    emb_key = _embedding_for_method(method)
+    if emb_key and emb_key in adata.obsm:
+        emb = adata.obsm[emb_key]
+        raw["n_pcs"] = float(emb.shape[1])
+
+        if batch_key and adata.obs[batch_key].nunique() >= 2:
+            try:
+                from sklearn.metrics import silhouette_score
+                raw["batch_silhouette"] = float(
+                    silhouette_score(emb, adata.obs[batch_key])
+                )
+            except Exception:
+                pass
+    elif "X_pca" in adata.obsm:
+        raw["n_pcs"] = float(adata.obsm["X_pca"].shape[1])
+        if batch_key and adata.obs[batch_key].nunique() >= 2:
+            try:
+                from sklearn.metrics import silhouette_score
+                raw["batch_silhouette"] = float(
+                    silhouette_score(adata.obsm["X_pca"], adata.obs[batch_key])
+                )
+            except Exception:
+                pass
+
+    composite = _compute_composite_score(raw, catalog_metrics)
+    return {
+        "metrics": raw,
+        "missing": [],
+        "composite_score": composite,
+    }
+
+
+def _detect_batch_col(adata) -> Optional[str]:
+    """Auto-detect the batch column in adata.obs."""
+    for candidate in ["batch", "sample", "donor", "orig.ident", "replicate", "Study_name", "LibraryID"]:
+        if candidate in adata.obs.columns and adata.obs[candidate].nunique() >= 2:
+            return candidate
+    return None
+
+
+def _embedding_for_method(method: str) -> Optional[str]:
+    """Map method name to its embedding key in adata.obsm."""
+    _MAP = {
+        "none": "X_pca",
+        "mnn_ingest": "X_ingest",
+        "harmony": "X_harmony",
+        "scanorama": "X_scanorama",
+        "bbknn": "X_pca",  # bbknn modifies the graph, embedding is still PCA
+    }
+    return _MAP.get(method, "X_pca")
+
+
+def _build_eval_result(
+    computed: Dict[str, Any],
+    catalog_metrics: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Map computed values to catalog metric names."""
     raw: Dict[str, float] = {}
     missing: List[str] = []
     for cm in catalog_metrics:
-        mname = cm['name']
+        mname = cm["name"]
         if mname in computed:
             raw[mname] = computed[mname]
         else:
             missing.append(mname)
-
-    # Also include all computed values that aren't in catalog
     for key, val in computed.items():
         if key not in raw:
             raw[key] = val
-
-    # Compute composite score (simple average of available catalog metrics)
     composite = _compute_composite_score(raw, catalog_metrics)
-
-    return {
-        'metrics': raw,
-        'missing': missing,
-        'composite_score': composite,
-    }
+    return {"metrics": raw, "missing": missing, "composite_score": composite}
 
 
 def _evaluate_from_result_json(
@@ -439,6 +572,79 @@ def _evaluate_from_result_json(
         'missing': missing,
         'composite_score': composite,
     }
+
+
+def _build_pivot_table(evaluations: List[Dict[str, Any]]) -> List[str]:
+    """Generate a pivot table comparing methods across datasets.
+    
+    Uses mean_ilisi (integration LISI score) as the primary cell value.
+    Falls back to n_batches for per-dataset context.
+    """
+    from collections import defaultdict
+    
+    # Group by (slug, dataset_root_id) to merge method variants
+    groups: Dict[Tuple[str, str], Dict[str, dict]] = defaultdict(dict)
+    for e in evaluations:
+        slug = e.get('slug', e.get('dataset_name', '?')).split('/')[0]
+        ds_id = e.get('dataset_id', '?')
+        # Extract root dataset ID (before method suffix): "3f7c.bbknn.processed" → "3f7c"
+        root_id = ds_id.split('.')[0] if '.' in ds_id else ds_id
+        method = e.get('method', '')
+        if not method:
+            # Infer from dataset_id: "3f7c.bbknn.processed" → "bbknn"
+            parts = ds_id.rsplit('.', 2)
+            method = parts[1] if len(parts) >= 2 else '?'
+        
+        raw = e.get('raw_metrics', {})
+        # Primary metric: mean_ilisi (integration score), fallback: batch_silhouette
+        score = raw.get('mean_ilisi') 
+        if score is None:
+            score = raw.get('batch_silhouette')
+        cells = raw.get('n_cells', 0)
+        batches = raw.get('n_batches', 0)
+        groups[(slug, root_id)][method] = {'score': score, 'cells': cells}
+        if '_cell_count' not in groups[(slug, root_id)] or cells > groups[(slug, root_id)].get('_cell_count', 0):
+            groups[(slug, root_id)]['_cell_count'] = cells
+            groups[(slug, root_id)]['_batches'] = batches
+
+    if not groups:
+        return ['*No data for pivot table*', '']
+
+    # Collect all method names
+    all_methods: List[str] = []
+    seen: set = set()
+    for g in groups.values():
+        for m in g:
+            if not m.startswith('_') and m not in seen:
+                all_methods.append(m)
+                seen.add(m)
+
+    # Header
+    header = '| Paper | Dataset | Cells | B |'
+    for m in all_methods:
+        header += f' {m} |'
+    lines = [
+        '## Results Matrix (mean_ilisi)', '', header,
+        '|' + '---|' * (4 + len(all_methods)),
+    ]
+
+    # Rows
+    for (slug, root_id), vals in sorted(groups.items()):
+        slug_short = slug[:22]
+        ds_short = root_id[:18]
+        cells = int(vals.get('_cell_count', 0))
+        batches = int(vals.get('_batches', 0))
+        line = f'| {slug_short} | {ds_short} | {cells} | {batches} |'
+        for m in all_methods:
+            v = vals.get(m, {})
+            s = v.get('score')
+            if s is None:
+                line += ' — |'
+            else:
+                line += f' {s:.2f} |'
+        lines.append(line)
+    lines.append('')
+    return lines
 
 
 def _compute_composite_score(
@@ -570,6 +776,9 @@ def _write_outputs(
         '',
     ]
 
+    # ── Pivot table: datasets rows × methods columns ──
+    report_lines.extend(_build_pivot_table(evaluations))
+
     # Rankings table
     rankings = summary.get('rankings', [])
     if rankings:
@@ -663,9 +872,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument('--output', required=True,
                         help='Benchmark suite output directory')
     parser.add_argument('--process-data-dir',
-                        help='Path to Stage 2 processed data directory')
+                        help='Path to Stage 3 processed data directory')
     parser.add_argument('--reproduce-dir',
-                        help='Path to Stage 1 reproduce output directory')
+                        help='Path to Stage 4 reproduce output directory')
     parser.add_argument('--catalog',
                         help='Path to metrics_catalog.json')
     parser.add_argument('--no-evaluate', action='store_true',
