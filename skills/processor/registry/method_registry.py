@@ -28,7 +28,8 @@ class MethodSpec:
     """A single method specification loaded from YAML."""
 
     __slots__ = ("name", "module", "import_test", "install", "validator",
-                 "validator_code", "description", "known_failures")
+                 "validator_code", "description", "known_failures",
+                 "requires_label")
 
     def __init__(self, raw: dict):
         self.name = raw["name"]
@@ -39,6 +40,7 @@ class MethodSpec:
         self.validator_code = raw.get("validator_code", "")
         self.description = raw.get("description", "")
         self.known_failures = raw.get("known_failures", [])
+        self.requires_label = bool(raw.get("requires_label", False))
 
     @property
     def is_available(self) -> bool:
@@ -136,15 +138,24 @@ class MethodRegistry:
         *,
         batch_key: str = "batch",
         methods: Optional[List[str]] = None,
+        **method_kwargs,
     ) -> Dict[str, Any]:
         """Run all available methods (or a subset) and return {method_name: result}.
 
         The actual method functions live in their modules (e.g. skills.processor.integration.methods).
         This dispatcher imports each module and calls run_all_methods().
+        Extra kwargs (e.g. label_key) are forwarded to run_all_methods.
         """
         specs = self.get_methods(benchmark_type)
         if methods:
             specs = [s for s in specs if s.name in methods]
+
+        # Label-based filtering: skip methods that REQUIRE a ground-truth
+        # label column when none is provided (annotation benchmark pattern,
+        # mirroring how integration skips methods without a batch column).
+        label_key = method_kwargs.get("label_key")
+        if label_key is None:
+            specs = [s for s in specs if not s.requires_label]
 
         # Group by module
         by_module: Dict[str, List[MethodSpec]] = {}
@@ -158,7 +169,9 @@ class MethodRegistry:
             try:
                 mod = importlib.import_module(module_name)
                 names = [s.name for s in module_specs]
-                results = mod.run_all_methods(adata.copy(), batch_key=batch_key, methods=names)
+                results = mod.run_all_methods(
+                    adata.copy(), batch_key=batch_key, methods=names, **method_kwargs
+                )
                 all_results.update(results)
             except Exception as exc:
                 logger.error("Module %s failed: %s", module_name, exc)

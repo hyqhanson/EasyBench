@@ -61,16 +61,26 @@ def _call_llm(prompt: str, system_prompt: str = "",
     _ensure_api_key_loaded()
     try:
         from omicsclaw.autoagent.llm_client import call_llm
-        return call_llm(
-            prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=4096,
-            llm_model=model or _DEFAULT_LLM_MODEL,
-        )
     except Exception as exc:
-        logger.warning("LLM call failed: %s", exc)
+        logger.warning("LLM client import failed: %s", exc)
         return None
+
+    # Retry a few times — DeepSeek can intermittently return empty/rate-limit.
+    for attempt in range(1, 4):
+        try:
+            resp = call_llm(
+                prompt,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=4096,
+                llm_model=model or _DEFAULT_LLM_MODEL,
+            )
+            if resp and resp.strip():
+                return resp
+            logger.warning("LLM returned empty response (attempt %d/3)", attempt)
+        except Exception as exc:
+            logger.warning("LLM call failed (attempt %d/3): %s", attempt, exc)
+    return None
 
 
 def _parse_llm_json(raw: str) -> Optional[Dict[str, Any]]:

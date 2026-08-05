@@ -195,14 +195,20 @@ def _discover_datasets(
         for h5ad_path in h5ad_files:
             rel = h5ad_path.relative_to(process_data_dir)
             parts = rel.parts
-            dataset_name = str(rel.parent).replace('\\', '/')
+            paper_slug = str(rel.parent).replace('\\', '/')
 
-            # Infer method from filename: "{dataset_id}.{method}.processed.h5ad"
+            # Infer method + dataset id from filename: "{dataset_id}.{method}.processed.h5ad"
             fname = h5ad_path.stem  # e.g. "3f7c572c.bbknn.processed"
             method = _infer_method_from_filename(fname)
+            dataset_id = _infer_dataset_id_from_filename(fname)
+
+            # dataset_name = paper_slug / dataset_id  → 同一论文不同数据集可区分
+            dataset_name = f"{paper_slug}/{dataset_id}" if dataset_id else paper_slug
 
             datasets.append({
                 'name': dataset_name,
+                'paper': paper_slug,
+                'dataset_id': dataset_id,
                 'type': 'processed_h5ad',
                 'path': str(h5ad_path),
                 'method': method,
@@ -240,6 +246,40 @@ def _infer_method_from_filename(fname: str) -> str:
     return "default"
 
 
+def _infer_dataset_id_from_filename(fname: str) -> str:
+    """Infer dataset id from filename like '3f7c.bbknn.processed' → '3f7c'.
+
+    Removes the '.{method}.processed' suffix, keeping the base dataset id.
+    """
+    # Strip known method suffixes: ".bbknn.processed", ".none.processed", etc.
+    known = {"none", "mnn_ingest", "harmony", "bbknn", "scanorama"}
+    base = fname
+    for m in known:
+        suffix = f".{m}.processed"
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    else:
+        # Also handle ".processed" without method
+        if base.endswith(".processed"):
+            base = base[: -len(".processed")]
+    return base
+
+
+def _read_n_cells_from_h5ad(path: str) -> int:
+    """Read n_obs from an h5ad file without loading the whole matrix.
+
+    Uses h5py to read just the X shape from the HDF5 header.
+    """
+    try:
+        import h5py
+        with h5py.File(path, 'r') as f:
+            shape = f['X'].shape
+            return int(shape[0])
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Catalog loading
 # ---------------------------------------------------------------------------
@@ -275,8 +315,11 @@ def _load_catalog(catalog_path: Optional[Path]) -> Dict[str, Any]:
             'annotation': {
                 'description': 'Metrics for cell type annotation accuracy.',
                 'metrics': [
-                    {'name': 'n_cell_types', 'display_name': 'N Cell Types', 'description': 'Number of cell types', 'category': 'annotation'},
-                    {'name': 'mean_confidence', 'display_name': 'Mean Confidence', 'description': 'Mean annotation confidence', 'category': 'annotation'},
+                    {'name': 'annotation_accuracy', 'display_name': 'Annotation Accuracy', 'description': 'Fraction of correctly assigned cell type labels', 'category': 'classification', 'composite': True, 'scale': [0, 1]},
+                    {'name': 'annotation_f1', 'display_name': 'Macro F1', 'description': 'Balanced F1 across cell types', 'category': 'classification', 'composite': True, 'scale': [0, 1]},
+                    {'name': 'annotation_ari', 'display_name': 'Adjusted Rand Index', 'description': 'Agreement with ground-truth clusters', 'category': 'classification', 'composite': True, 'scale': [0, 1]},
+                    {'name': 'mean_confidence', 'display_name': 'Mean Confidence', 'description': 'Mean annotation confidence', 'category': 'annotation', 'composite': True, 'scale': [0, 1]},
+                    {'name': 'n_cell_types', 'display_name': 'N Cell Types', 'description': 'Number of distinct predicted cell types', 'category': 'annotation', 'composite': False},
                 ],
             },
         },
@@ -374,50 +417,87 @@ def _evaluate_from_adata(
     method: str,
     catalog_metrics: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Use the autoagent metrics_compute to score a processed.h5ad file.
+    """Score a processed.h5ad file using standardized metrics.
 
-    On failure, attempts self-healing via SelfHealAgent (LLM-powered retry).
-    
+    Priority:
+      1. scIB standard metrics (tools.metrics.compute_standard_metrics) —
+         the recommended backend (iLISI, cLISI, batch ASW, cell-type ASW).
+      2. omicsclaw autoagent metrics (legacy, if scIB unavailable).
+      3. _evaluate_fallback — basic QC metrics.
+
     IMPORTANT: Passes the correct embedding key per method, so harmony
-    uses X_harmony, mnn_ingest uses X_ingest, etc. — NOT always X_pca.
+    uses X_harmony, mnn_ingest uses X_ingest, etc.
     """
-    import importlib
     import traceback
-
-    try:
-        mod = importlib.import_module("omicsclaw.autoagent.metrics_compute")
-        compute_fn = getattr(mod, "compute_metrics_from_adata")
-    except (ImportError, AttributeError):
-        logger.debug("omicsclaw metrics_compute not available, using fallback")
-        return _evaluate_fallback(h5ad_path, method, catalog_metrics)
 
     # Determine the embedding key to use for this method
     embedding_key = _embedding_for_method(method)
 
-    for attempt in range(2):
-        try:
-            computed = compute_fn(
-                h5ad_path,
-                skill_name=skill_name,
-                method=method,
-                params={"embedding_key": embedding_key},  # ← KEY FIX: method-specific embedding
+    # ── Path 0: annotation metrics (if method produced *_labels) ──
+    # Runs whenever predicted labels exist. n_cell_types / mean_confidence
+    # are computed without ground truth; accuracy/F1/ARI only when a
+    # ground-truth label column is detected.
+    try:
+        import scanpy as sc
+        from skills.processor.tools import compute_standard_annotation_metrics
+        adata = sc.read_h5ad(str(h5ad_path))
+        label_cols = [c for c in adata.obs.columns if c.endswith("_labels")]
+        if label_cols:
+            label_key = _detect_label_col(adata)
+            computed = compute_standard_annotation_metrics(
+                adata, label_key=label_key or "cell_type", method_label_col=label_cols[0]
             )
-            if not computed:
-                return None
+            if computed:
+                return _build_eval_result(computed, catalog_metrics)
+    except Exception as exc:
+        logger.debug("annotation metrics path failed: %s", exc)
 
+    # ── Path 1: scIB standard metrics (recommended) ──
+    try:
+        from skills.processor.tools import compute_standard_metrics
+        import scanpy as sc
+
+        adata = sc.read_h5ad(str(h5ad_path))
+        batch_key = _detect_batch_col(adata) or "batch"
+        label_key = _detect_label_col(adata)
+        computed = compute_standard_metrics(
+            adata,
+            batch_key=batch_key,
+            label_key=label_key,
+            embedding_key=embedding_key,
+        )
+        if computed:
             return _build_eval_result(computed, catalog_metrics)
+    except Exception as exc:
+        logger.debug("scIB metrics path failed (%s), trying omicsclaw", exc)
 
-        except Exception as exc:
-            tb = traceback.format_exc()
-            logger.warning("Evaluation attempt %d failed for %s: %s", attempt + 1, h5ad_path, exc)
-            if attempt == 0:
-                healer = _get_eval_healer()
-                if healer:
+    # ── Path 2: omicsclaw legacy metrics ──
+    try:
+        import importlib
+        mod = importlib.import_module("omicsclaw.autoagent.metrics_compute")
+        compute_fn = getattr(mod, "compute_metrics_from_adata")
+        for attempt in range(2):
+            try:
+                computed = compute_fn(
+                    h5ad_path,
+                    skill_name=skill_name,
+                    method=method,
+                    params={"embedding_key": embedding_key},
+                )
+                if computed:
+                    return _build_eval_result(computed, catalog_metrics)
+                break
+            except Exception as exc:
+                tb = traceback.format_exc()
+                logger.warning("omicsclaw attempt %d failed for %s: %s", attempt + 1, h5ad_path, exc)
+                if attempt == 0 and _get_eval_healer():
                     logger.info("Self-healing evaluation for %s via LLM...", method)
-                    # Give it another try
                 else:
-                    return _evaluate_fallback(h5ad_path, method, catalog_metrics)
+                    break
+    except (ImportError, AttributeError):
+        logger.debug("omicsclaw metrics_compute not available")
 
+    # ── Path 3: fallback QC metrics ──
     return _evaluate_fallback(h5ad_path, method, catalog_metrics)
 
 
@@ -484,6 +564,14 @@ def _evaluate_fallback(
 def _detect_batch_col(adata) -> Optional[str]:
     """Auto-detect the batch column in adata.obs."""
     for candidate in ["batch", "sample", "donor", "orig.ident", "replicate", "Study_name", "LibraryID"]:
+        if candidate in adata.obs.columns and adata.obs[candidate].nunique() >= 2:
+            return candidate
+    return None
+
+
+def _detect_label_col(adata) -> Optional[str]:
+    """Auto-detect a cell-type / annotation column for biology metrics."""
+    for candidate in ["cell_type", "celltype", "cell_ontology_class", "annotation", "label", "labels", "cell_identity", "cluster"]:
         if candidate in adata.obs.columns and adata.obs[candidate].nunique() >= 2:
             return candidate
     return None
@@ -585,22 +673,26 @@ def _build_pivot_table(evaluations: List[Dict[str, Any]]) -> List[str]:
     # Group by (slug, dataset_root_id) to merge method variants
     groups: Dict[Tuple[str, str], Dict[str, dict]] = defaultdict(dict)
     for e in evaluations:
-        slug = e.get('slug', e.get('dataset_name', '?')).split('/')[0]
-        ds_id = e.get('dataset_id', '?')
-        # Extract root dataset ID (before method suffix): "3f7c.bbknn.processed" → "3f7c"
+        # New format: dataset_name = "slug/dataset_id", method = "bbknn"
+        # Old format: slug / dataset_id separate keys
+        ds_name = e.get('dataset_name', '')
+        slug = ds_name.split('/')[0] if ds_name else e.get('slug', '?')
+        ds_id = ds_name.split('/')[-1] if '/' in ds_name else (e.get('dataset_id') or '?')
         root_id = ds_id.split('.')[0] if '.' in ds_id else ds_id
-        method = e.get('method', '')
-        if not method:
-            # Infer from dataset_id: "3f7c.bbknn.processed" → "bbknn"
+        method = e.get('method', '') or ''
+        if not method and '.' in ds_id:
             parts = ds_id.rsplit('.', 2)
             method = parts[1] if len(parts) >= 2 else '?'
-        
+
         raw = e.get('raw_metrics', {})
         # Primary metric: mean_ilisi (integration score), fallback: batch_silhouette
-        score = raw.get('mean_ilisi') 
+        score = raw.get('mean_ilisi')
         if score is None:
             score = raw.get('batch_silhouette')
         cells = raw.get('n_cells', 0)
+        # If n_cells not in raw_metrics, read from the h5ad file header directly
+        if not cells and e.get('source_path'):
+            cells = _read_n_cells_from_h5ad(e['source_path'])
         batches = raw.get('n_batches', 0)
         groups[(slug, root_id)][method] = {'score': score, 'cells': cells}
         if '_cell_count' not in groups[(slug, root_id)] or cells > groups[(slug, root_id)].get('_cell_count', 0):
@@ -653,21 +745,43 @@ def _compute_composite_score(
 ) -> Optional[float]:
     """Compute a weighted composite score from raw metrics.
 
-    Uses equal weighting for catalog metrics that are present.
-    If no catalog metrics are available, averages all raw metrics.
+    Only metrics flagged ``composite: true`` in the catalog participate;
+    count/QC metrics (n_cell_types, n_batches, n_pcs, ...) are excluded so
+    they can't inflate or dominate the average. Each participating value is
+    optionally min-max normalized to its catalog ``scale: [lo, hi]`` (values
+    >= 1.0 are clamped to 1.0 when scale is [0,1]).
+
+    Returns ``None`` when no composite-eligible metric was computed, so
+    datasets with no usable signal are reported as N/A instead of getting a
+    meaningless high score.
     """
     if not raw_metrics:
         return None
 
-    catalog_names = {m['name'] for m in catalog_metrics}
-    present = [v for k, v in raw_metrics.items() if k in catalog_names]
+    # Build lookup: name -> (composite?, scale)
+    spec = {m['name']: m for m in catalog_metrics}
 
-    if present:
-        return round(sum(present) / len(present), 6)
+    normalized: List[float] = []
+    for name, val in raw_metrics.items():
+        m = spec.get(name)
+        if m is None or not m.get('composite', True):
+            continue
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            continue
+        scale = m.get('scale')
+        if isinstance(scale, (list, tuple)) and len(scale) == 2:
+            lo, hi = float(scale[0]), float(scale[1])
+            if hi > lo:
+                v = (v - lo) / (hi - lo)
+        if m.get('scale') == [0, 1]:
+            v = min(1.0, max(0.0, v))
+        normalized.append(v)
 
-    # Fall back to all raw metrics
-    values = list(raw_metrics.values())
-    return round(sum(values) / len(values), 6) if values else None
+    if not normalized:
+        return None
+    return round(sum(normalized) / len(normalized), 6)
 
 
 # ---------------------------------------------------------------------------

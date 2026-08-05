@@ -61,19 +61,40 @@
           "name": "annotation_accuracy",
           "display_name": "Annotation Accuracy",
           "description": "Fraction of correctly assigned cell type labels.",
-          "category": "classification"
+          "category": "classification",
+          "composite": true,
+          "scale": [0, 1]
         },
         {
-          "name": "f1_macro",
+          "name": "annotation_f1",
           "display_name": "Macro F1 Score",
           "description": "Balanced classification performance across cell types.",
-          "category": "classification"
+          "category": "classification",
+          "composite": true,
+          "scale": [0, 1]
         },
         {
-          "name": "label_transfer_score",
-          "display_name": "Label Transfer Score",
-          "description": "Accuracy of transferring labels between datasets.",
-          "category": "classification"
+          "name": "annotation_ari",
+          "display_name": "Adjusted Rand Index",
+          "description": "Agreement between predicted labels and ground-truth clusters.",
+          "category": "classification",
+          "composite": true,
+          "scale": [0, 1]
+        },
+        {
+          "name": "mean_confidence",
+          "display_name": "Mean Confidence",
+          "description": "Mean prediction confidence score of the annotation method.",
+          "category": "annotation",
+          "composite": true,
+          "scale": [0, 1]
+        },
+        {
+          "name": "n_cell_types",
+          "display_name": "N Cell Types",
+          "description": "Number of distinct cell types predicted by the annotation method.",
+          "category": "annotation",
+          "composite": false
         }
       ]
     },

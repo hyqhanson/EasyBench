@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark Suite Pipeline — end-to-end resumable benchmark workflow.
 
-Chains benchmark_dispatch → reproduce_paper → benchmark_evaluation into a
+Chains benchmark_dispatch reproduce_paper benchmark_evaluation into a
 single pipeline with checkpoint-based resumption and human interrupt points.
 
 Usage:
@@ -276,14 +276,14 @@ def run_stage_curate(
     print(f'  Stage 2: Agent Curator — Detect & Convert & Validate')
     print(f'{"=" * 60}')
 
-    # 1. LLM detection → curation_plan.json
+    # 1. LLM detection curation_plan.json
     result = run_agent_curator(
         benchmark_type=f'{benchmark_type}_{output_dir.name}',
         data_root=data_root,
         use_llm=use_llm,
     )
 
-    # 2. Deterministic execution → curated.h5ad (per paper)
+    # 2. Deterministic execution curated.h5ad (per paper)
     data_dir = data_root / f'{benchmark_type}_{output_dir.name}'
     paper_slugs = [d.name for d in sorted(data_dir.iterdir())
                    if d.is_dir() and not d.name.startswith('_') and (d / 'curation_plan.json').exists()]
@@ -370,7 +370,7 @@ def run_stage_process_data(
     (QC + normalize + HVG + PCA) to produce clean AnnData ready
     for downstream benchmark analysis.
 
-    Formula: Stage 2 curated.h5ad  →  sc-preprocessing  →  processed.h5ad
+    Formula: Stage 2 curated.h5ad   sc-preprocessing   processed.h5ad
 
     The benchmark analysis (e.g. sc-batch-integration) runs in Stage 6.
     """
@@ -396,7 +396,7 @@ def run_stage_process_data(
         save_summary(output_dir, summary)
         return {'processed': [], 'status': 'skipped'}
 
-# ── Use Processor (scanpy) to preprocess curated.h5ad → processed.h5ad ──
+# ── Use Processor (scanpy) to preprocess curated.h5ad processed.h5ad ──
     bm_full = f'{bm_type}_{output_dir.name}'
     process_out = output_dir / '03_process_data'
     process_out.mkdir(parents=True, exist_ok=True)
@@ -409,7 +409,7 @@ def run_stage_process_data(
 
     processed = result.get('results', [])
     status = result.get('status', 'error')
-    print(f'  Processor: {len(processed)} file(s) preprocessed → {process_out}')
+    print(f'  Processor: {len(processed)} file(s) preprocessed {process_out}')
 
     summary['stages']['03_process_data'] = {
         'status': 'completed',
@@ -503,7 +503,7 @@ def run_stage_reproduce(
         agent_results.append(ar_result)
         score = ar_result.get('reproducibility', {}).get('score', 'N/A')
         pkg_count = len(ar_result.get('missing_packages', []))
-        print(f'  → Score: {score}/100, Missing packages: {pkg_count}')
+        print(f'  Score: {score}/100, Missing packages: {pkg_count}')
 
     summary['stages']['04_reproduce'] = {
         'status': 'completed',
@@ -534,7 +534,7 @@ def run_stage_reproduce(
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-# Map skill-name → actual Python module file name
+# Map skill-name actual Python module file name
 _SKILL_MODULE_MAP: Dict[str, str] = {
     'sc-ambient-removal':       'sc_ambient',
     'sc-batch-integration':     'sc_integrate',
@@ -716,7 +716,7 @@ def run_stage_benchmark_evaluate(
     reproduce_dir = stage_dir(output_dir, 4, 'reproduce')
 
     catalog_path = (
-        _PROJECT_ROOT / 'orchestrator' / 'reproducibility_evaluation' / 'metrics_catalog.json'
+        _PROJECT_ROOT / 'skills' / 'orchestrator' / 'reproducibility_evaluation' / 'metrics_catalog.json'
     )
 
     result = run_benchmark_evaluation(
@@ -761,6 +761,8 @@ def run_benchmark_suite(
     resume: bool = False,
     no_download: bool = False,
     no_process: bool = False,
+    no_reproduce: bool = False,
+    no_reproduce_eval: bool = False,
     no_reproduce_clone: bool = False,
     no_reproduce_install: bool = False,
     no_reproduce_run: bool = False,
@@ -774,7 +776,7 @@ def run_benchmark_suite(
     output_dir = Path(output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     catalog_path = (
-        _PROJECT_ROOT / 'orchestrator' / 'reproducibility_evaluation' / 'metrics_catalog.json'
+        _PROJECT_ROOT / 'skills' / 'orchestrator' / 'reproducibility_evaluation' / 'metrics_catalog.json'
     )
 
     summary = load_summary(output_dir)
@@ -791,7 +793,7 @@ def run_benchmark_suite(
 
     # --- Stage 0: Dispatch ---
     if resume and is_stage_completed(output_dir, 0):
-        print(f'  → Stage 0 already completed, resuming at stage 1.')
+        print(f'  Stage 0 already completed, resuming at stage 1.')
     else:
         collected_data = run_stage_dispatch(
             benchmark_type, query, specific_input,
@@ -821,7 +823,7 @@ def run_benchmark_suite(
     # --- Stage 1: Process downloaded data ---
     # --- Stage 1: Preflight / AgentScanner ---
     if resume and is_stage_completed(output_dir, 1):
-        print(f'  → Stage 1 already completed, resuming at stage 2.')
+        print(f'  Stage 1 already completed, resuming at stage 2.')
     else:
         data_root = _OMICSCLAW_ROOT / 'benchmark_data'
         run_stage_preflight(benchmark_type, output_dir, summary, use_llm=use_llm)
@@ -831,7 +833,7 @@ def run_benchmark_suite(
 
     # --- Stage 2: Curator (detect + convert + validate) ---
     if resume and is_stage_completed(output_dir, 2):
-        print(f'  → Stage 2 already completed, resuming at stage 3.')
+        print(f'  Stage 2 already completed, resuming at stage 3.')
     else:
         data_root = _OMICSCLAW_ROOT / 'benchmark_data'
         run_stage_curate(
@@ -843,7 +845,7 @@ def run_benchmark_suite(
 
     # --- Stage 3: Process downloaded data (sc-standardize + sc-preprocessing) ---
     if resume and is_stage_completed(output_dir, 3):
-        print(f' → Stage 3 already completed, resuming at stage 4.')
+        print(f' Stage 3 already completed, resuming at stage 4.')
     else:
         run_stage_process_data(
             collected_data, output_dir, summary, no_process=no_process,
@@ -853,8 +855,12 @@ def run_benchmark_suite(
         print(f'     Run with --resume to skip to Stage 4.\n')
 
     # --- Stage 4: Reproduce Paper ---
-    if resume and is_stage_completed(output_dir, 4):
-        print(f'  → Stage 4 already completed, resuming at stage 5.')
+    if no_reproduce:
+        summary['stages']['04_reproduce'] = {'status': 'skipped', 'reason': '--no-reproduce flag'}
+        print(f'  Stage 4 skipped (--no-reproduce).')
+        mark_stage_completed(output_dir, 4)  # write checkpoint so --resume skips it
+    elif resume and is_stage_completed(output_dir, 4):
+        print(f'  Stage 4 already completed, resuming at stage 5.')
     else:
         # Load dispatch results if not already in memory
         if not collected_data:
@@ -883,8 +889,13 @@ def run_benchmark_suite(
         print(f'     Run with --resume to skip to Stage 5.\n')
 
     # --- Stage 5: Reproducibility Evaluation ---
-    if resume and is_stage_completed(output_dir, 5):
-        print(f'  → Stage 5 already completed.')
+    if no_reproduce or no_reproduce_eval:
+        reason = '--no-reproduce' if no_reproduce else '--no-reproduce-eval'
+        summary['stages']['05_reproducibility_evaluation'] = {'status': 'skipped', 'reason': f'{reason} flag'}
+        print(f'  Stage 5 skipped ({reason}).')
+        mark_stage_completed(output_dir, 5)  # write checkpoint so --resume skips it
+    elif resume and is_stage_completed(output_dir, 5):
+        print(f'  Stage 5 already completed.')
     else:
         # Load reproduce result from disk if needed
         if reproduce_result is None and is_stage_completed(output_dir, 4):
@@ -906,7 +917,7 @@ def run_benchmark_suite(
 
     # --- Stage 6: Benchmark Evaluation ---
     if resume and is_stage_completed(output_dir, 6):
-        print(f'  → Stage 6 already completed.')
+        print(f'  Stage 6 already completed.')
     else:
         process_dir = output_dir / '03_process_data'
         eval_out = output_dir / '06_benchmark_evaluation'
@@ -957,6 +968,10 @@ def parse_args() -> argparse.Namespace:
                         help='Skip dataset download')
     parser.add_argument('--no-process', action='store_true',
                         help='Skip data processing through OmicsClaw sc tools')
+    parser.add_argument('--no-reproduce', action='store_true',
+                        help='Skip the entire reproduce-paper stage (4)')
+    parser.add_argument('--no-reproduce-eval', action='store_true',
+                        help='Skip the reproducibility-evaluation stage (5)')
     parser.add_argument('--no-reproduce-clone', action='store_true',
                         help='Skip repository cloning during reproduction')
     parser.add_argument('--no-reproduce-install', action='store_true',
@@ -988,6 +1003,8 @@ def main() -> int:
             resume=args.resume,
             no_download=args.no_download,
             no_process=args.no_process,
+            no_reproduce=args.no_reproduce,
+            no_reproduce_eval=args.no_reproduce_eval,
             no_reproduce_clone=args.no_reproduce_clone,
             no_reproduce_install=args.no_reproduce_install,
             no_reproduce_run=args.no_reproduce_run,

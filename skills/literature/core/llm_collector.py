@@ -325,11 +325,14 @@ def _analysis_context(analysis_type: str) -> Tuple[str, str, str]:
             'novel subpopulations through clustering.',
         ),
         'annotation': (
-            'cell-type label, reference map, marker gene, classification, cell identity',
-            'annotated cell types, well-characterized tissue, marker gene lists, reference atlas',
-            'Requires a reference dataset with known cell-type labels and a query dataset. '
-            'Look for "cell-type annotation", "reference mapping", "label transfer", or '
-            '"classification" of cell types using single-cell data.',
+            'cell-type label, reference map, marker gene, classification, cell identity, annotated atlas',
+            'annotated cell types, well-characterized tissue, marker gene lists, reference atlas, ground-truth labels',
+            'Requires a single-cell dataset with KNOWN cell-type labels (ground-truth annotation) '
+            'or an annotated reference atlas. The data MUST include per-cell cell-type labels '
+            '(e.g. "CD4 T cells", "hepatocytes", cluster names) — papers that only provide raw '
+            'unlabeled expression matrices are NOT suitable unless they also supply an '
+            'annotation/ground-truth label file. Look for "cell-type annotation", "reference mapping", '
+            '"label transfer", "annotated atlas", "cell-type labels", or "scRNA-seq atlas with cell types".',
         ),
         'deconvolution': (
             'cell-type proportion, mixture decomposition, bulk-to-single-cell, composition',
@@ -525,6 +528,7 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"    \"tissue\": \"...\",\n"
         f"    \"technology\": \"...\",\n"
         f"    \"data_quality_signals\": [\"raw_counts\", \"processed_counts\", \"both\", \"unknown\"],\n"
+        f"    \"has_cell_type_labels\": true|false,\n"
         f"    \"data_origin\": \"author_collected\"|\"public_reanalysis\"|\"unclear\",\n"
         f"    \"first_hand_data\": false,\n"
         f"    \"benchmark_relevance_score\": 0-10,\n"
@@ -555,6 +559,10 @@ def llm_extract_paper_details(text: str, benchmark_type: str) -> Optional[Dict[s
         f"    * Put dataset DOIs/URLs in **zenodo_data** (raw .h5ad/.mtx/.rds files, count matrices, supplements)\n"
         f"    * Put software/notebook DOIs/URLs in **zenodo_code** (code archives, Python packages, analysis scripts)\n"
         f"    * If unsure, include in BOTH lists.\n"
+        f"- **has_cell_type_labels**: set TRUE only if the deposited dataset itself includes per-cell\n"
+        f"  cell-type labels / annotation (e.g. an annotated Seurat/h5ad object, a metadata file with\n"
+        f"  cell_type/annotation columns, cluster labels). FALSE if only raw unlabeled counts are deposited.\n"
+        f"  For {benchmark_type} benchmarks this field is critical.\n"
         f"- **New: capture institutional/non-standard code URLs in other_code_urls**.\n"
         f"    * ANY code repository URL that is NOT GitHub and NOT Zenodo (Figshare links already have their own key figshare_links).\n"
         f"    * Examples: keeper.mpdl.mpg.de, osf.io, dryad, institutional GitLab, custom data portals.\n"
@@ -1654,27 +1662,42 @@ def _llm_collect_impl(
                 if not _first_hand and relevance < 7:
                     has_data = False  # downgrade: Zenodo overlap is likely tool/data not real dataset
 
+            # --- Annotation-specific gate: require per-cell cell-type labels ---
+            # For cell-type annotation benchmarks the data must carry ground-truth
+            # labels. If the LLM explicitly says has_cell_type_labels=false, the
+            # dataset is unusable for annotation regardless of GSE/code presence.
+            _has_labels = llm_data.get('has_cell_type_labels')
+            if isinstance(_has_labels, str):
+                _has_labels = _has_labels.lower() in ('true', 'yes', '1')
+            _annot_gate_blocked = False
+            if benchmark_type == 'annotation' and _has_labels is False and has_data:
+                _annot_gate_blocked = True
+                acceptance = 'REJECTED'
+
             # --- Tiered acceptance ---
-            if has_data and has_code:
-                acceptance = 'FULLY_ACCEPTED'
-            elif has_data and not has_code:
-                acceptance = 'DATA_ONLY'
-            elif not has_data and has_code:
-                acceptance = 'CODE_ONLY'
-            else:
-                # No explicit accessions — check LLM's first_hand_data signal
-                _first_hand = llm_data.get('first_hand_data')
-                if isinstance(_first_hand, str):
-                    _first_hand = _first_hand.lower() in ('true', 'yes', '1')
-                if _first_hand and relevance >= 7:
+            if not _annot_gate_blocked:
+                if has_data and has_code:
+                    acceptance = 'FULLY_ACCEPTED'
+                elif has_data and not has_code:
                     acceptance = 'DATA_ONLY'
-                    # Mark inferred — accessions likely in supplementary/full text
-                    if not gse:
-                        gse = ['INFERRED_DATA']
+                elif not has_data and has_code:
+                    acceptance = 'CODE_ONLY'
                 else:
-                    acceptance = 'REJECTED'
+                    # No explicit accessions — check LLM's first_hand_data signal
+                    _first_hand = llm_data.get('first_hand_data')
+                    if isinstance(_first_hand, str):
+                        _first_hand = _first_hand.lower() in ('true', 'yes', '1')
+                    if _first_hand and relevance >= 7:
+                        acceptance = 'DATA_ONLY'
+                        # Mark inferred — accessions likely in supplementary/full text
+                        if not gse:
+                            gse = ['INFERRED_DATA']
+                    else:
+                        acceptance = 'REJECTED'
 
             skip_reason_parts = []
+            if _annot_gate_blocked:
+                skip_reason_parts.append('annotation benchmark: dataset has no per-cell cell-type labels (has_cell_type_labels=false)')
             if not has_data:
                 skip_reason_parts.append('no dataset accessions (GSE/SRA/cellxgene/Zenodo data) found')
             if not has_code:

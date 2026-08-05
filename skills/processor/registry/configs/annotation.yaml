@@ -1,0 +1,56 @@
+# Annotation benchmark methods registry
+# Each method defines: name, module, import_test, install, validator, label column
+#
+# requires_label:
+#   true  → method NEEDS a ground-truth label column (cell_type/labels) in adata.obs.
+#           The processor skips these methods when no label column is detected
+#           (same pattern as integration skipping methods without a batch column).
+#   false → method runs regardless (e.g. celltypist uses its own reference model).
+
+methods:
+  - name: celltypist
+    module: skills.processor.tools.annotation
+    import_test: "celltypist"
+    install: "pip install celltypist"
+    requires_label: false
+    validator: "'celltypist_labels' in adata.obs.columns"
+    validator_code: |
+      def validate(adata, batch_key):
+          return "celltypist_labels" in adata.obs.columns
+    description: "CellTypist — reference-based cell type annotation (immune-focused models)"
+    known_failures:
+      - pattern: "downloading model"
+        fix_hint: "First run downloads reference model from celltypist.cog.sanger.ac.uk; ensure internet access"
+
+  - name: logreg
+    module: skills.processor.tools.annotation
+    import_test: "sklearn"
+    requires_label: true
+    validator: "'logreg_labels' in adata.obs.columns"
+    validator_code: |
+      def validate(adata, batch_key):
+          return "logreg_labels" in adata.obs.columns
+    description: "Logistic regression classifier trained on labeled cells (reference-based)"
+    note: "Requires a ground-truth label column (cell_type/labels) in adata.obs for training"
+
+  - name: randomforest
+    module: skills.processor.tools.annotation
+    import_test: "sklearn"
+    requires_label: true
+    validator: "'rf_labels' in adata.obs.columns"
+    validator_code: |
+      def validate(adata, batch_key):
+          return "rf_labels" in adata.obs.columns
+    description: "Random Forest classifier trained on labeled cells"
+    note: "Requires a ground-truth label column (cell_type/labels) in adata.obs for training"
+
+  - name: majority
+    module: skills.processor.tools.annotation
+    import_test: "true"
+    requires_label: true
+    validator: "'majority_labels' in adata.obs.columns"
+    validator_code: |
+      def validate(adata, batch_key):
+          return "majority_labels" in adata.obs.columns
+    description: "Majority-class baseline — assigns most common label to all cells"
+    note: "Requires a ground-truth label column (cell_type/labels) to compute the majority class"
